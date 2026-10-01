@@ -1,3 +1,4 @@
+import { useTaskGroups } from "@/api/hooks/useTaskGroups";
 import { Form, Input, Select } from "antd";
 import {
   HARNESS_ADAPTERS,
@@ -8,14 +9,17 @@ import type { HarnessDraft } from "./harnessDraft";
 
 /** The harness spec fields, shared by the harness page and an Agent's inline harness. */
 export function HarnessFields({
+  namespace,
   draft,
   onChange,
 }: {
+  namespace: string;
   draft: HarnessDraft;
   onChange: (next: HarnessDraft) => void;
 }) {
   const set = <K extends keyof HarnessDraft>(field: K, value: HarnessDraft[K]) =>
     onChange({ ...draft, [field]: value });
+  const groups = useTaskGroups(namespace);
   const byo = draft.adapter === "byo";
   const image = draft.image.trim();
   const imageInvalid = image !== "" && !HARNESS_IMAGE_PATTERN.test(image);
@@ -86,19 +90,24 @@ export function HarnessFields({
       </Form.Item>
 
       <Form.Item
-        label="Worker pool"
+        label="TaskGroup"
         required
-        extra="Where this harness's Substrate Actors are scheduled. A pool in the same namespace."
+        validateStatus={groups.error ? "error" : undefined}
+        help={groups.error?.message}
+        extra="AX capacity group in this namespace."
       >
-        <Input
-          data-testid="harness-worker-pool"
-          value={draft.workerPool}
-          onChange={(event) => set("workerPool", event.target.value)}
-          placeholder="kagent-default"
+        <Select
+          data-testid="harness-task-group"
+          value={draft.taskGroup || undefined}
+          onChange={(value) => set("taskGroup", value)}
+          loading={groups.isLoading}
+          showSearch
+          options={(groups.data ?? []).map((group) => ({ value: group.name, label: `${group.name} (${group.phase}, ${group.replicas})` }))}
+          placeholder="Select a TaskGroup"
         />
       </Form.Item>
 
-      <Form.Item label="Snapshot location" required extra="Where Substrate stores runtime snapshots.">
+      <Form.Item label="Snapshot location override" extra="Optional. Defaults to the AX TaskGroup snapshot location.">
         <Input
           data-testid="harness-snapshot"
           value={draft.snapshotLocation}

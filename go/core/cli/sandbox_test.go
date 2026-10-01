@@ -14,8 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/agent-substrate/env/guest"
-	guestpb "github.com/agent-substrate/env/proto/ateenv/v1alpha"
+	guestpb "github.com/google/ax/pkg/apis/v1alpha1"
 	apiv1alpha1 "github.com/kagent-dev/kagent/go/api/gen/kagent/api/v1alpha1"
 	sandboxapi "github.com/kagent-dev/kagent/go/api/sandbox"
 	"github.com/kagent-dev/kagent/go/core/cli"
@@ -34,8 +33,7 @@ const sandboxTestID = "33333333-3333-4333-8333-333333333333"
 
 type sandboxTestServer struct {
 	apiv1alpha1.UnimplementedSandboxServiceServer
-	guestpb.UnimplementedProcessServiceServer
-	guestpb.UnimplementedFileSystemServiceServer
+	guestpb.UnimplementedTaskExecutionServiceServer
 	mu           sync.Mutex
 	created      *apiv1alpha1.CreateSandboxRequest
 	starts       int
@@ -58,8 +56,7 @@ func newSandboxTestServer(t *testing.T) (*sandboxTestServer, string) {
 	server := grpc.NewServer()
 	healthpb.RegisterHealthServer(server, health.NewServer())
 	apiv1alpha1.RegisterSandboxServiceServer(server, s)
-	guestpb.RegisterProcessServiceServer(server, s)
-	guestpb.RegisterFileSystemServiceServer(server, s)
+	guestpb.RegisterTaskExecutionServiceServer(server, s)
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	go func() { _ = server.Serve(listener) }()
@@ -362,34 +359,4 @@ func TestSandboxCLIFileTransfer(t *testing.T) {
 	s.mu.Unlock()
 	_, _, err = runSandboxCLI(t, endpoint, "upload", sandboxTestID, input, "denied.bin")
 	require.ErrorContains(t, err, "write denied")
-}
-
-func TestSandboxCLIWithGuest(t *testing.T) {
-	cfg := guest.DefaultConfig()
-	cfg.Workspace, cfg.LogDir = t.TempDir(), t.TempDir()
-	server, cleanup, err := guest.NewServer(cfg)
-	require.NoError(t, err)
-	t.Cleanup(cleanup)
-	t.Cleanup(server.Stop)
-	healthpb.RegisterHealthServer(server, health.NewServer())
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	go func() { _ = server.Serve(listener) }()
-	endpoint := "http://" + listener.Addr().String()
-	dir := t.TempDir()
-	input, output := filepath.Join(dir, "input.txt"), filepath.Join(dir, "output.txt")
-	require.NoError(t, os.WriteFile(input, []byte("hello"), 0600))
-	_, _, err = runSandboxCLI(t, endpoint, "upload", sandboxTestID, input, "input.txt")
-	require.NoError(t, err)
-	out, stderr, err := runSandboxCLI(t, endpoint, "exec", sandboxTestID, "--cwd", cfg.Workspace, "--", "sh", "-c", "tr a-z A-Z < input.txt > output.txt; printf done; printf warning >&2; exit 7")
-	var exitError interface{ ExitCode() int }
-	require.ErrorAs(t, err, &exitError)
-	require.Equal(t, 7, exitError.ExitCode())
-	require.Equal(t, "done", out)
-	require.Contains(t, stderr, "warning")
-	_, _, err = runSandboxCLI(t, endpoint, "download", sandboxTestID, "output.txt", output)
-	require.NoError(t, err)
-	data, err := os.ReadFile(output)
-	require.NoError(t, err)
-	require.Equal(t, "HELLO", string(data))
 }

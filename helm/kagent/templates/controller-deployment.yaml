@@ -35,29 +35,18 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       serviceAccountName: {{ include "kagent.fullname" . }}-controller
-      {{- if or (gt (len .Values.controller.volumes) 0) (and .Values.controller.substrate .Values.controller.substrate.enabled) }}
       volumes:
-      {{- if and .Values.controller.substrate .Values.controller.substrate.enabled }}
-      - name: substrate-servicedns
-        projected:
-          sources:
-          - clusterTrustBundle:
-              signerName: servicedns.podcert.ate.dev/identity
-              labelSelector:
-                matchLabels:
-                  podcert.ate.dev/canarying: live
-              path: trust-bundle.pem
-      - name: substrate-podidentity
-        projected:
-          sources:
-          - podCertificate:
-              signerName: podidentity.podcert.ate.dev/identity
-              keyType: ECDSAP256
-              credentialBundlePath: credential-bundle.pem
-      {{- end }}
+      - name: ax-ca
+        secret:
+          secretName: {{ required "controller.ax.caSecretName is required" .Values.controller.ax.caSecretName | quote }}
+      - name: ax-client
+        secret:
+          secretName: {{ required "controller.ax.clientSecretName is required" .Values.controller.ax.clientSecretName | quote }}
+      - name: api-tls
+        secret:
+          secretName: {{ required "controller.tls.secretName is required" .Values.controller.tls.secretName | quote }}
       {{- with .Values.controller.volumes }}
       {{- toYaml . | nindent 6 }}
-      {{- end }}
       {{- end }}
       {{- with .Values.controller.nodeSelector }}
       nodeSelector:
@@ -148,6 +137,7 @@ spec:
             httpGet:
               path: /health
               port: http
+              scheme: HTTPS
             periodSeconds: 15
             initialDelaySeconds: 15
           {{- end }}
@@ -159,19 +149,19 @@ spec:
             httpGet:
               path: /health
               port: http
+              scheme: HTTPS
             periodSeconds: 30
           {{- end }}
-          {{- if or (gt (len .Values.controller.volumeMounts) 0) (and .Values.controller.substrate .Values.controller.substrate.enabled) }}
           volumeMounts:
-            {{- if and .Values.controller.substrate .Values.controller.substrate.enabled }}
-            - name: substrate-servicedns
-              mountPath: /run/substrate-servicedns
+            - name: ax-ca
+              mountPath: /run/ax-ca
               readOnly: true
-            - name: substrate-podidentity
-              mountPath: /run/substrate-podidentity
+            - name: ax-client
+              mountPath: /run/ax-client
               readOnly: true
-            {{- end }}
+            - name: api-tls
+              mountPath: /run/api-tls
+              readOnly: true
             {{- with .Values.controller.volumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
-          {{- end }}

@@ -23,6 +23,10 @@ jobs:
         fetch-depth: 0
         persist-credentials: false
 
+    - uses: ./.github/actions/checkout-ax
+      with:
+        repository: ${{ vars.AX_REPOSITORY }}
+        ref: ${{ vars.AX_REF }}
     - name: Prepare nightly release
       id: prepare
       env:
@@ -77,6 +81,10 @@ jobs:
           - sandbox-guest
     steps:
     - uses: actions/checkout@v6
+    - uses: ./.github/actions/checkout-ax
+      with:
+        repository: ${{ vars.AX_REPOSITORY }}
+        ref: ${{ vars.AX_REF }}
     - uses: ./.github/actions/publish-image
       with:
         version: ${{ needs.prepare.outputs.version }}
@@ -88,6 +96,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v6
+    - uses: ./.github/actions/checkout-ax
+      with:
+        repository: ${{ vars.AX_REPOSITORY }}
+        ref: ${{ vars.AX_REF }}
     - uses: ./.github/actions/publish-helm
       with:
         version: ${{ needs.prepare.outputs.version }}
@@ -98,6 +110,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v6
+    - uses: ./.github/actions/checkout-ax
+      with:
+        repository: ${{ vars.AX_REPOSITORY }}
+        ref: ${{ vars.AX_REF }}
     - uses: ./.github/actions/build-release-artifacts
       with:
         version: ${{ needs.prepare.outputs.version }}

@@ -3,16 +3,13 @@ ARG BUILDPLATFORM
 FROM --platform=$BUILDPLATFORM $BASE_IMAGE_REGISTRY/chainguard/go:latest AS builder
 ARG TARGETARCH
 
-WORKDIR /workspace
-COPY go.mod go.sum ./
-COPY core/pkg/env/ core/pkg/env/
-COPY pkg/logging/ pkg/logging/
-COPY sandbox/guest/cmd/ sandbox/guest/cmd/
-
+WORKDIR /workspace/ax
+# The sibling AX module owns and builds its private Guest runtime.
+COPY ax/ /workspace/ax/
 RUN --mount=type=cache,target=/root/go/pkg/mod,rw \
     --mount=type=cache,target=/root/.cache/go-build,rw \
     CGO_ENABLED=0 GOOS=linux GOARCH=$TARGETARCH \
-    go build -mod=readonly -trimpath -o /kagent-sandbox-guest ./sandbox/guest/cmd
+    go build -mod=readonly -trimpath -o /kagent-sandbox-guest ./cmd/ax-sandbox-guest
 
 FROM alpine:3.22
 

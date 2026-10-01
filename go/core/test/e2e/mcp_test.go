@@ -199,7 +199,7 @@ func TestMCPCheckpointFork(t *testing.T) {
 
 func mcpEndpoint(t *testing.T) string {
 	t.Helper()
-	return "http://" + interactionTarget(t) + "/mcp"
+	return "https://" + interactionTarget(t) + "/mcp"
 }
 
 func mcpInvoke(t *testing.T, endpoint, sessionID, message string, tasks bool) map[string]any {

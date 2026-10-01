@@ -40,12 +40,12 @@ func statusForAgent(state AgentReconciliation, generation int64, latestSuccessfu
 	}
 	setAgentCondition(&status, generation, kagentv1alpha3.AgentConditionResolvedRefs, metav1.ConditionTrue, "Resolved", "All runtime references resolved")
 	setAgentCondition(&status, generation, kagentv1alpha3.AgentConditionCompatible, metav1.ConditionTrue, "Compatible", "Resolved configuration is compatible with the Harness")
-	if state.ObservedActorTemplate.GetStatus().GetGoldenSnapshotStatus().GetGoldenTag() == nil {
-		setAgentCondition(&status, generation, kagentv1alpha3.AgentConditionReady, metav1.ConditionFalse, "ActorTemplatePending", "waiting for the ActorTemplate golden snapshot")
+	if state.ObservedRuntime.GetPhase() != "Ready" {
+		setAgentCondition(&status, generation, kagentv1alpha3.AgentConditionReady, metav1.ConditionFalse, "PreparedRuntimePending", "waiting for the AX runtime")
 		return status
 	}
 	status.LatestSuccessfulRevision = state.Target.RevisionID.String()
-	setAgentCondition(&status, generation, kagentv1alpha3.AgentConditionReady, metav1.ConditionTrue, "Ready", "ActorTemplate golden snapshot is ready")
+	setAgentCondition(&status, generation, kagentv1alpha3.AgentConditionReady, metav1.ConditionTrue, "Ready", "AX runtime is ready")
 	return status
 }
 

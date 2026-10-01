@@ -40,7 +40,7 @@ var (
 	_                         = RegisterStringVar("KAGENT_E2E_CLAUDE_IMAGE", "", "Digest-pinned Claude harness image substituted into E2E lifecycle manifests.", ComponentTesting)
 	_                         = RegisterStringVar("KAGENT_E2E_CODEX_IMAGE", "", "Digest-pinned Codex harness image substituted into E2E lifecycle manifests.", ComponentTesting)
 	E2ESandboxNamespace       = RegisterStringVar("KAGENT_E2E_SANDBOX_NAMESPACE", "kagent", "Namespace for sandbox E2E resources.", ComponentTesting)
-	E2ESandboxWorkerPool      = RegisterStringVar("KAGENT_E2E_SANDBOX_WORKER_POOL", "kagent-default", "Worker pool used by sandbox E2E resources.", ComponentTesting)
+	E2ESandboxTaskGroup       = RegisterStringVar("KAGENT_E2E_SANDBOX_TASK_GROUP", "kagent-default", "AX TaskGroup used by sandbox E2E resources.", ComponentTesting)
 	E2EOTLPListenAddress      = RegisterStringVar("KAGENT_E2E_OTLP_LISTEN_ADDRESS", "", "Listen address for the E2E suite's OTLP trace receiver. Unset disables the shared receiver.", ComponentTesting)
 	E2ERequireTracing         = RegisterStringVar("KAGENT_E2E_REQUIRE_TRACING", "false", "Fail instead of skip when expected native harness tracing support is unavailable. Enabled by true, ignoring case and surrounding whitespace.", ComponentTesting)
 	E2ERunUpgradeTests        = RegisterStringVar("KAGENT_E2E_RUN_UPGRADE_TESTS", "false", "Run upgrade integration tests when exactly true.", ComponentTesting)

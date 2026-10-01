@@ -155,7 +155,7 @@ type HarnessSpec struct {
 	Env []RuntimeEnvVar `json:"env,omitempty"`
 
 	// +required
-	Substrate RuntimeSubstratePolicy `json:"substrate"`
+	AX RuntimeAXPolicy `json:"ax"`
 }
 
 // HarnessCapabilities records behavior proven for a pinned adapter and runtime.

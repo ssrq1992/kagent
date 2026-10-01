@@ -3,17 +3,15 @@ package controller
 import (
 	"context"
 	"errors"
-	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	atev1alpha1 "github.com/agent-substrate/substrate/pkg/api/v1alpha1"
-	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
+	ax "github.com/google/ax/pkg/apis/v1alpha1"
 	kagentclient "github.com/kagent-dev/kagent/go/api/clientset/versioned"
 	kagentv1alpha3 "github.com/kagent-dev/kagent/go/api/v1alpha3"
+	"github.com/kagent-dev/kagent/go/core/internal/axruntime"
 	"github.com/kagent-dev/kagent/go/core/internal/controller/apiclient"
-	"github.com/kagent-dev/kagent/go/core/internal/substrate"
 	"github.com/stretchr/testify/require"
 	"istio.io/istio/pkg/kube/krt"
 	corev1 "k8s.io/api/core/v1"
@@ -50,19 +48,21 @@ func TestSandboxKRTInformerQueueAndRestartCleanup(t *testing.T) {
 	_, err = client.ApiV1alpha3().SandboxTemplates(unwatched.Namespace).Create(t.Context(), unwatched, metav1.CreateOptions{})
 	require.NoError(t, err)
 	store := &sandboxTestStore{}
-	actors := &sandboxTestActors{store: store, templates: map[string]*ateapipb.ActorTemplate{}, autoReady: true}
-	pool := &atev1alpha1.WorkerPool{ObjectMeta: metav1.ObjectMeta{Namespace: template.Namespace, Name: "default"}}
-	start := func() (func(), krt.StaticCollection[*atev1alpha1.WorkerPool]) {
+	actors := &sandboxTestActors{store: store, templates: map[string]*ax.PreparedRuntime{}, autoReady: true}
+	pool := sandboxGroupObservation{Ref: &ax.ResourceRef{Atespace: template.Namespace, Name: "default", Uid: "group-uid"}}
+	start := func() (func(), krt.StaticCollection[sandboxGroupObservation]) {
 		ctx, cancel := context.WithCancel(t.Context())
 		runtimeClient, err := apiclient.New(config)
 		require.NoError(t, err)
 		options := krt.NewOptionsBuilder(ctx.Done(), "sandbox-integration", nil)
-		pools := krt.NewStaticCollection(nil, []*atev1alpha1.WorkerPool{pool}, options.WithName("WorkerPools")...)
 		runtime := &Runtime{Client: runtimeClient, Options: options, Collections: Collections{
-			SandboxTemplates: typedCollection[*kagentv1alpha3.SandboxTemplate](runtimeClient, []string{"team-a"}, "SandboxTemplates", options), WorkerPools: pools,
+			SandboxTemplates: typedCollection[*kagentv1alpha3.SandboxTemplate](runtimeClient, []string{"team-a"}, "SandboxTemplates", options),
 		}}
-		reconciler, err := NewSandboxReconciler(config, runtime, store, actors, substrate.SandboxPolicy{GuestImage: "guest@sha256:" + strings.Repeat("b", 64), CPU: "1", Memory: "1Gi"})
+		reconciler, err := NewSandboxReconciler(config, runtime, store, actors, axruntime.SandboxPolicy{CPU: "1", Memory: "1Gi"})
 		require.NoError(t, err)
+		pools := reconciler.collections.groups
+		pools.UpdateObject(pool)
+		actors.groups = pools
 		results := make(chan error, 2)
 		go func() { results <- runtime.Start(ctx) }()
 		go func() { results <- reconciler.Start(ctx) }()
@@ -102,8 +102,7 @@ func TestSandboxKRTInformerQueueAndRestartCleanup(t *testing.T) {
 	require.Empty(t, other.Status.Conditions)
 
 	// A dependency update alone must change the persisted revision.
-	changedPool := pool.DeepCopy()
-	changedPool.Spec.SandboxClass = atev1alpha1.SandboxClassMicroVM
+	changedPool := sandboxGroupObservation{Ref: &ax.ResourceRef{Atespace: pool.Ref.Atespace, Name: pool.Ref.Name, Uid: "new-group-uid"}}
 	pools.UpdateObject(changedPool)
 	require.Eventually(t, func() bool {
 		store.mu.Lock()
@@ -117,7 +116,7 @@ func TestSandboxKRTInformerQueueAndRestartCleanup(t *testing.T) {
 			return false
 		}
 		condition := apimeta.FindStatusCondition(current.Status.Conditions, "Ready")
-		return condition != nil && condition.Status == metav1.ConditionFalse && condition.Reason == "WorkerPoolNotFound"
+		return condition != nil && condition.Status == metav1.ConditionFalse && condition.Reason == "TaskGroupUnresolved"
 	}, 10*time.Second, 10*time.Millisecond)
 	pools.UpdateObject(changedPool)
 	require.Eventually(t, ready, 10*time.Second, 10*time.Millisecond)

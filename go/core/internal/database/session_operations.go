@@ -169,8 +169,8 @@ func (c *Client) FinishSessionOperation(ctx context.Context, sessionID string, i
 		}
 		tag, err := tx.Exec(ctx, `
             UPDATE session SET data = $2,
-                actor_uid = CASE WHEN $4 THEN $3 ELSE actor_uid END
-            WHERE id = $1 AND ($3::text = '' OR actor_uid = $3 OR (actor_uid IS NULL AND $4))
+                task_uid = CASE WHEN $4 THEN $3 ELSE task_uid END
+            WHERE id = $1 AND ($3::text = '' OR task_uid = $3 OR (task_uid IS NULL AND $4))
         `, row.ID, row.Data, actorUID, failure == "" && row.Operation == apiv1alpha1.RuntimeOperation_RUNTIME_OPERATION_CREATE.String())
 		if err != nil {
 			return err

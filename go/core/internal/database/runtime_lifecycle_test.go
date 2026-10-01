@@ -49,7 +49,7 @@ func TestAgentWritesRejectSandboxRevisions(t *testing.T) {
 	sessionFixture(t, client, ctx, "team-a", "revision", "assistant", "kagent")
 	_, err := pool.Exec(ctx, `
 		WITH created AS (
-			INSERT INTO runtime_revision (revision, kind, namespace, source_snapshot, actor_template_atespace, actor_template_name, actor_template_uid)
+			INSERT INTO runtime_revision (revision, kind, namespace, source_snapshot, prepared_runtime_atespace, prepared_runtime_name, prepared_runtime_uid)
 			VALUES ('sandbox-revision', 'sandbox', 'team-a', '{}', 'team-a', 'scratch', 'original-uid') RETURNING revision
 		)
 		INSERT INTO sandbox_revision (revision, sandbox_template_name, sandbox_template_uid)
@@ -68,10 +68,10 @@ func TestAgentWritesRejectSandboxRevisions(t *testing.T) {
 
 	revision, err := client.GetRuntimeRevision(ctx, "revision")
 	require.NoError(t, err)
-	revision.Revision, revision.ActorTemplateUID = "sandbox-revision", "replacement-uid"
+	revision.Revision, revision.PreparedRuntimeUID = "sandbox-revision", "replacement-uid"
 	require.ErrorIs(t, client.RecordRuntimeRevision(ctx, *revision, true), ErrConflict)
 	var uid string
-	require.NoError(t, pool.QueryRow(ctx, "SELECT actor_template_uid FROM runtime_revision WHERE revision = 'sandbox-revision'").Scan(&uid))
+	require.NoError(t, pool.QueryRow(ctx, "SELECT prepared_runtime_uid FROM runtime_revision WHERE revision = 'sandbox-revision'").Scan(&uid))
 	require.Equal(t, "original-uid", uid)
 	var count int
 	require.NoError(t, pool.QueryRow(ctx, "SELECT count(*) FROM agent_revision WHERE revision = 'sandbox-revision'").Scan(&count))

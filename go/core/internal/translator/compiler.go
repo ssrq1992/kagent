@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	ax "github.com/google/ax/pkg/apis/v1alpha1"
 	"maps"
 
 	"github.com/kagent-dev/kagent/go/api/v1alpha3"
@@ -158,13 +159,16 @@ func (c *Compiler) compileConfiguration(ctx context.Context, agentName string, h
 	if err != nil {
 		return nil, err
 	}
-	workerKey := types.NamespacedName{Namespace: harness.Namespace, Name: harness.Spec.Substrate.WorkerPoolRef.Name}
-	workerPool := krt.FetchOne(c.ctx, c.collections.WorkerPools, krt.FilterObjectName(workerKey))
+	workerKey := types.NamespacedName{Namespace: harness.Namespace, Name: harness.Spec.AX.TaskGroupRef.Name}
+	workerPool := krt.FetchOne(c.ctx, c.collections.TaskGroups, krt.FilterKey(workerKey.String()))
 	if workerPool == nil {
-		return nil, &WorkerPoolNotFoundError{WorkerPool: workerKey}
+		return nil, &TaskGroupNotFoundError{TaskGroup: workerKey}
 	}
 	result.AgentName = agentName
-	result.SandboxClass = (*workerPool).Spec.SandboxClass
+	result.GroupRef = ax.Ref(workerPool.Group.Metadata)
+	if err := ax.ValidateRef(result.GroupRef, true); err != nil {
+		return nil, NewValidationError("AX TaskGroup has no valid UID binding")
+	}
 	return result, nil
 }
 

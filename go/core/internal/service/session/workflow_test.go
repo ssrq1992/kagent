@@ -8,16 +8,16 @@ import (
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2apb/v1"
-	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
+	ax "github.com/google/ax/pkg/apis/v1alpha1"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	apiv1alpha1 "github.com/kagent-dev/kagent/go/api/gen/kagent/api/v1alpha1"
+	"github.com/kagent-dev/kagent/go/core/internal/axruntime"
 	"github.com/kagent-dev/kagent/go/core/internal/database"
 	"github.com/kagent-dev/kagent/go/core/internal/dbtest"
-	"github.com/kagent-dev/kagent/go/core/internal/egress"
 	"github.com/kagent-dev/kagent/go/core/internal/service/serviceerrors"
-	"github.com/kagent-dev/kagent/go/core/internal/substrate"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
@@ -25,8 +25,8 @@ import (
 
 func TestActorWorkflowLifecycle(t *testing.T) {
 	store, session := lifecycleFixture(t)
-	actors := &lifecycleTestActors{actors: map[string]*ateapipb.Actor{}}
-	workflow := NewActorWorkflow(store, actors)
+	actors := &lifecycleTestActors{actors: map[string]*ax.Task{}}
+	workflow := NewTaskWorkflow(store, actors)
 
 	created, err := workflow.Create(context.Background(), session)
 	if err != nil {
@@ -38,21 +38,21 @@ func TestActorWorkflowLifecycle(t *testing.T) {
 	if len(actors.actors) != 1 {
 		t.Fatalf("actors = %v", actors.actors)
 	}
-	if actor := actors.actors[actorKey("team-a", substrate.ActorName(session.GetId()))]; actor.GetStatus().GetState() != ateapipb.ActorState_ACTOR_STATE_SUSPENDED {
-		t.Fatalf("created Actor status = %s", actor.GetStatus().GetState())
+	if actor := actors.actors[actorKey("team-a", axruntime.TaskName(session.GetId()))]; actor.GetStatus().GetRuntimeStatus().GetPhase() != "Suspended" {
+		t.Fatalf("created Actor status = %s", actor.GetStatus().GetRuntimeStatus().GetPhase())
 	}
-	actors.actors[actorKey("team-a", substrate.ActorName(session.GetId()))].Status.State = ateapipb.ActorState_ACTOR_STATE_RUNNING
+	actors.actors[actorKey("team-a", axruntime.TaskName(session.GetId()))].Status.RuntimeStatus.Phase = "Running"
 	if err := workflow.Pause(context.Background(), created); err != nil {
 		t.Fatal(err)
 	}
-	if actor := actors.actors[actorKey("team-a", substrate.ActorName(session.GetId()))]; actor.GetStatus().GetState() != ateapipb.ActorState_ACTOR_STATE_PAUSED {
-		t.Fatalf("paused Actor status = %s", actor.GetStatus().GetState())
+	if actor := actors.actors[actorKey("team-a", axruntime.TaskName(session.GetId()))]; actor.GetStatus().GetRuntimeStatus().GetPhase() != "Paused" {
+		t.Fatalf("paused Actor status = %s", actor.GetStatus().GetRuntimeStatus().GetPhase())
 	}
 	boundary, err := workflow.Quiesce(context.Background(), created)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if created.GetState() != apiv1alpha1.RuntimeState_RUNTIME_STATE_READY || boundary.URI != "s3://snapshots/snapshot-1" {
+	if created.GetState() != apiv1alpha1.RuntimeState_RUNTIME_STATE_READY || boundary.Reference == "" {
 		t.Fatalf("quiesced session = %+v, boundary = %+v", created, boundary)
 	}
 
@@ -63,8 +63,8 @@ func TestActorWorkflowLifecycle(t *testing.T) {
 	if suspended.GetState() != apiv1alpha1.RuntimeState_RUNTIME_STATE_SUSPENDED || suspended.GetOperation() != apiv1alpha1.RuntimeOperation_RUNTIME_OPERATION_NONE {
 		t.Fatalf("suspended session = %+v", suspended)
 	}
-	if actor := actors.actors[actorKey("team-a", substrate.ActorName(session.GetId()))]; actor.GetStatus().GetState() != ateapipb.ActorState_ACTOR_STATE_SUSPENDED {
-		t.Fatalf("suspended Actor status = %s", actor.GetStatus().GetState())
+	if actor := actors.actors[actorKey("team-a", axruntime.TaskName(session.GetId()))]; actor.GetStatus().GetRuntimeStatus().GetPhase() != "Suspended" {
+		t.Fatalf("suspended Actor status = %s", actor.GetStatus().GetRuntimeStatus().GetPhase())
 	}
 
 	resumed, err := workflow.Resume(context.Background(), suspended)
@@ -90,13 +90,13 @@ func TestActorWorkflowRejectsReplacedRuntime(t *testing.T) {
 	for _, operation := range []string{"pause", "quiesce", "suspend", "delete"} {
 		t.Run(operation, func(t *testing.T) {
 			store, session := lifecycleFixture(t)
-			actors := &lifecycleTestActors{actors: map[string]*ateapipb.Actor{}}
-			workflow := NewActorWorkflow(store, actors)
+			actors := &lifecycleTestActors{actors: map[string]*ax.Task{}}
+			workflow := NewTaskWorkflow(store, actors)
 			session, err := workflow.Create(t.Context(), session)
 			require.NoError(t, err)
-			actor := actors.actors[actorKey("team-a", substrate.ActorName(session.Id))]
+			actor := actors.actors[actorKey("team-a", axruntime.TaskName(session.Id))]
 			actor.Metadata.Uid = "replacement-uid"
-			actor.Status.State = ateapipb.ActorState_ACTOR_STATE_RUNNING
+			actor.Status.RuntimeStatus.Phase = "Running"
 			switch operation {
 			case "pause":
 				err = workflow.Pause(t.Context(), session)
@@ -107,8 +107,8 @@ func TestActorWorkflowRejectsReplacedRuntime(t *testing.T) {
 			case "delete":
 				_, err = workflow.Delete(t.Context(), session)
 			}
-			require.ErrorContains(t, err, "verify runtime actor UID")
-			require.Equal(t, ateapipb.ActorState_ACTOR_STATE_RUNNING, actor.Status.State)
+			require.Error(t, err)
+			require.Equal(t, "Running", actor.Status.RuntimeStatus.Phase)
 			require.Len(t, actors.actors, 1)
 		})
 	}
@@ -116,20 +116,20 @@ func TestActorWorkflowRejectsReplacedRuntime(t *testing.T) {
 
 func TestActorWorkflowForkCreatesSuspendedActorFromCheckpoint(t *testing.T) {
 	store, session := lifecycleFixture(t)
-	actors := &lifecycleTestActors{actors: map[string]*ateapipb.Actor{}}
+	actors := &lifecycleTestActors{actors: map[string]*ax.Task{}}
 	session, checkpointID := lifecycleForkFixture(t, store, actors, session)
-	fork, err := NewActorWorkflow(store, actors).Create(t.Context(), session)
+	fork, err := NewTaskWorkflow(store, actors).Create(t.Context(), session)
 	if err != nil {
 		t.Fatal(err)
 	}
-	actor := actors.actors[actorKey("team-a", substrate.ActorName(session.GetId()))]
+	actor := actors.actors[actorKey("team-a", axruntime.TaskName(session.GetId()))]
 	if fork.GetState() != apiv1alpha1.RuntimeState_RUNTIME_STATE_READY ||
-		actor.GetStatus().GetState() != ateapipb.ActorState_ACTOR_STATE_SUSPENDED ||
-		actor.GetSourceTag().GetName() != "checkpoint-"+checkpointID {
+		actor.GetStatus().GetRuntimeStatus().GetPhase() != "Suspended" ||
+		actor.GetSpec().GetRestoreFrom().GetName() != "checkpoint-"+checkpointID {
 		t.Fatalf("fork = %+v, actor = %+v", fork, actor)
 	}
-	actor.Status.ExternalSnapshot.SnapshotUri = "s3://snapshots/later-turn"
-	replayed, err := NewActorWorkflow(store, actors).Create(t.Context(), session)
+	actor.Status.RuntimeStatus.BoundaryRef = "s3://snapshots/later-turn"
+	replayed, err := NewTaskWorkflow(store, actors).Create(t.Context(), session)
 	require.NoError(t, err)
 	require.True(t, proto.Equal(fork, replayed), "a retry returns the current session without revalidating later Actor state")
 }
@@ -152,7 +152,7 @@ func lifecycleFixture(t *testing.T) (*lifecycleTestStore, *apiv1alpha1.Session) 
 		Revision: "revision-1", Namespace: "team-a", AgentName: "assistant", AgentUID: "template-uid",
 		SourceSnapshot: []byte("{}"),
 		AgentCard:      &a2apb.AgentCard{Name: "assistant"}, EgressDestinations: []string{},
-		ActorTemplateAtespace: "team-a", ActorTemplateName: "assistant-kagent-revision", ActorTemplateUID: "actor-template-uid",
+		PreparedRuntimeAtespace: "team-a", PreparedRuntimeName: "assistant-kagent-revision", PreparedRuntimeUID: "actor-template-uid",
 	}
 	require.NoError(t, client.UpsertAgentDefinition(t.Context(), database.AgentDefinition{Namespace: "team-a", AgentName: "assistant", AgentUID: "template-uid", DesiredRevision: revision.Revision}))
 	require.NoError(t, client.RecordRuntimeRevision(t.Context(), *revision, true))
@@ -171,104 +171,105 @@ func (s *lifecycleTestStore) GetRuntimeRevision(context.Context, string) (*datab
 }
 
 type lifecycleTestActors struct {
+	ax.AXClient
 	mu          sync.Mutex
-	actors      map[string]*ateapipb.Actor
-	policyErr   error
-	policy      *ateapipb.EgressPolicy
-	policyActor string
-	policyCalls int
+	actors      map[string]*ax.Task
+	checkpoints map[string]*ax.TaskCheckpoint
+	prepareErr  error
 }
 
-func actorKey(atespace, name string) string { return atespace + "/" + name }
-
-func (a *lifecycleTestActors) GetActor(_ context.Context, atespace, name string) (*ateapipb.Actor, error) {
+func actorKey(space, name string) string { return space + "/" + name }
+func (a *lifecycleTestActors) GetPreparedRuntime(_ context.Context, req *ax.GetPreparedRuntimeRequest, _ ...grpc.CallOption) (*ax.PreparedRuntime, error) {
+	if a.prepareErr != nil {
+		return nil, a.prepareErr
+	}
+	return &ax.PreparedRuntime{Metadata: &ax.ObjectMeta{Atespace: req.Ref.Atespace, Name: req.Ref.Name, Uid: req.Ref.Uid}, Spec: &ax.PreparedRuntimeSpec{GroupRef: &ax.ResourceRef{Atespace: req.Ref.Atespace, Name: "default", Uid: "group-uid"}}, Phase: "Ready"}, nil
+}
+func (a *lifecycleTestActors) GetTask(_ context.Context, req *ax.GetTaskRequest, _ ...grpc.CallOption) (*ax.Task, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	actor := a.actors[actorKey(atespace, name)]
-	if actor == nil {
+	task := a.actors[actorKey(req.Atespace, req.Name)]
+	if task == nil {
 		return nil, status.Error(codes.NotFound, "missing")
 	}
-	return proto.CloneOf(actor), nil
+	return proto.CloneOf(task), nil
 }
-
-func (a *lifecycleTestActors) CreateActor(_ context.Context, atespace, name, templateNamespace, templateName string) (*ateapipb.Actor, error) {
+func (a *lifecycleTestActors) CreateTask(_ context.Context, req *ax.CreateTaskRequest, _ ...grpc.CallOption) (*ax.Task, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	actor := &ateapipb.Actor{
-		Metadata:      &ateapipb.ResourceMetadata{Atespace: atespace, Name: name, Uid: "actor-uid"},
-		ActorTemplate: &ateapipb.ObjectRef{Atespace: templateNamespace, Name: templateName},
-		Status:        &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_SUSPENDED},
+	key := actorKey(req.Task.Metadata.Atespace, req.Task.Metadata.Name)
+	if task := a.actors[key]; task != nil {
+		if task.Status.RuntimeStatus.LastOperationId != req.RequestId {
+			return nil, status.Error(codes.AlreadyExists, "different request")
+		}
+		return proto.CloneOf(task), nil
 	}
-	a.actors[actorKey(atespace, name)] = actor
-	return proto.CloneOf(actor), nil
+	task := proto.CloneOf(req.Task)
+	task.Metadata.Uid = uuid.NewString()
+	task.Status = &ax.TaskStatus{RuntimeStatus: &ax.TaskRuntimeStatus{Phase: "Suspended", LastOperationId: req.RequestId, BoundaryRef: "boundary-1", Restorable: true}}
+	a.actors[key] = task
+	return proto.CloneOf(task), nil
 }
-
-func (a *lifecycleTestActors) CreateActorFromTag(_ context.Context, atespace, name, templateNamespace, templateName, tagAtespace, tagName string) (*ateapipb.Actor, error) {
+func (a *lifecycleTestActors) transition(space, name, uid, id, phase string) (*ax.Task, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	actor := &ateapipb.Actor{
-		Metadata:      &ateapipb.ResourceMetadata{Atespace: atespace, Name: name, Uid: "actor-uid"},
-		ActorTemplate: &ateapipb.ObjectRef{Atespace: templateNamespace, Name: templateName},
-		SourceTag:     &ateapipb.ObjectRef{Atespace: tagAtespace, Name: tagName},
-		Status: &ateapipb.ActorStatus{
-			State:            ateapipb.ActorState_ACTOR_STATE_SUSPENDED,
-			ExternalSnapshot: &ateapipb.ExternalSnapshot{SnapshotUri: "s3://snapshots/snapshot-1", ContentScope: ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA},
-		},
+	task := a.actors[actorKey(space, name)]
+	if task == nil {
+		return nil, status.Error(codes.NotFound, "missing")
 	}
-	a.actors[actorKey(atespace, name)] = actor
-	return proto.CloneOf(actor), nil
-}
-
-func (a *lifecycleTestActors) ResumeActor(_ context.Context, atespace, name string) (*ateapipb.Actor, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	actor := a.actors[actorKey(atespace, name)]
-	actor.Status.State = ateapipb.ActorState_ACTOR_STATE_RUNNING
-	return proto.CloneOf(actor), nil
-}
-
-func (a *lifecycleTestActors) PauseActor(_ context.Context, atespace, name string) (*ateapipb.Actor, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	actor := a.actors[actorKey(atespace, name)]
-	actor.Status.State = ateapipb.ActorState_ACTOR_STATE_PAUSED
-	return proto.CloneOf(actor), nil
-}
-
-func (a *lifecycleTestActors) SuspendActor(_ context.Context, atespace, name string) (*ateapipb.Actor, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	actor := a.actors[actorKey(atespace, name)]
-	actor.Status.State = ateapipb.ActorState_ACTOR_STATE_SUSPENDED
-	actor.Status.ExternalSnapshot = &ateapipb.ExternalSnapshot{SnapshotUri: "s3://snapshots/snapshot-1", ContentScope: ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA}
-	return proto.CloneOf(actor), nil
-}
-
-func (a *lifecycleTestActors) DeleteActor(_ context.Context, atespace, name string) error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	delete(a.actors, actorKey(atespace, name))
-	return nil
-}
-
-func TestQuiesceRejectsWrongActorIdentity(t *testing.T) {
-	session := &apiv1alpha1.Session{Id: "session-1", PreparedRevision: "revision-1"}
-	store := &lifecycleTestStore{revision: &database.RuntimeRevision{ActorTemplateAtespace: "team-a"}}
-	actors := &lifecycleTestActors{actors: map[string]*ateapipb.Actor{
-		actorKey("team-a", substrate.ActorName(session.Id)): {
-			Metadata: &ateapipb.ResourceMetadata{Atespace: "team-a", Name: "different-actor", Uid: "actor-uid"},
-			Status:   &ateapipb.ActorStatus{},
-		},
-	}}
-	if _, err := NewActorWorkflow(store, actors).Quiesce(t.Context(), session); err == nil {
-		t.Fatal("Quiesce() accepted the wrong Actor")
+	if task.Metadata.Uid != uid {
+		return nil, status.Error(codes.FailedPrecondition, "UID changed")
 	}
+	task.Status.RuntimeStatus.Phase = phase
+	task.Status.RuntimeStatus.LastOperationId = id
+	if phase == "Suspended" {
+		task.Status.RuntimeStatus.BoundaryRef = "boundary-1"
+		task.Status.RuntimeStatus.Restorable = true
+	}
+	return proto.CloneOf(task), nil
+}
+func (a *lifecycleTestActors) ResumeTask(_ context.Context, r *ax.ResumeTaskRequest, _ ...grpc.CallOption) (*ax.Task, error) {
+	return a.transition(r.Atespace, r.Name, r.ExpectedUid, r.OperationId, "Running")
+}
+func (a *lifecycleTestActors) SuspendTask(_ context.Context, r *ax.SuspendTaskRequest, _ ...grpc.CallOption) (*ax.Task, error) {
+	return a.transition(r.Atespace, r.Name, r.ExpectedUid, r.OperationId, "Suspended")
+}
+func (a *lifecycleTestActors) PauseTask(_ context.Context, r *ax.PauseTaskRequest, _ ...grpc.CallOption) (*ax.Task, error) {
+	return a.transition(r.Ref.Atespace, r.Ref.Name, r.Ref.Uid, r.OperationId, "Paused")
+}
+func (a *lifecycleTestActors) DeleteTask(_ context.Context, r *ax.DeleteTaskRequest, _ ...grpc.CallOption) (*ax.DeleteTaskResponse, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	key := actorKey(r.Atespace, r.Name)
+	if task := a.actors[key]; task != nil && task.Metadata.Uid != r.ExpectedUid {
+		return nil, status.Error(codes.FailedPrecondition, "UID changed")
+	}
+	delete(a.actors, key)
+	return &ax.DeleteTaskResponse{}, nil
+}
+func (a *lifecycleTestActors) GetTaskCheckpoint(_ context.Context, r *ax.GetTaskCheckpointRequest, _ ...grpc.CallOption) (*ax.TaskCheckpoint, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	checkpoint := a.checkpoints[r.Ref.Name]
+	if checkpoint == nil || checkpoint.Metadata.Uid != r.Ref.Uid {
+		return nil, status.Error(codes.NotFound, "missing")
+	}
+	return proto.CloneOf(checkpoint), nil
+}
+func TestQuiesceRejectsWrongTaskIdentity(t *testing.T) {
+	store, session := lifecycleFixture(t)
+	runtime := &lifecycleTestActors{actors: map[string]*ax.Task{}}
+	session, err := NewTaskWorkflow(store, runtime).Create(t.Context(), session)
+	require.NoError(t, err)
+	runtime.actors[actorKey("team-a", axruntime.TaskName(session.Id))].Metadata.Name = "different-task"
+	_, err = NewTaskWorkflow(store, runtime).Quiesce(t.Context(), session)
+	require.Error(t, err)
 }
 
 // lifecycleForkFixture retains a real checkpoint and its independent fork history.
 func lifecycleForkFixture(t *testing.T, store *lifecycleTestStore, actors *lifecycleTestActors, source *apiv1alpha1.Session) (*apiv1alpha1.Session, string) {
 	t.Helper()
-	source, err := NewActorWorkflow(store, actors).Create(t.Context(), source)
+	source, err := NewTaskWorkflow(store, actors).Create(t.Context(), source)
 	require.NoError(t, err)
 	message := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("hello"))
 	message.ContextID = source.ContextId
@@ -284,10 +285,19 @@ func lifecycleForkFixture(t *testing.T, store *lifecycleTestStore, actors *lifec
 	boundary, err := store.ClaimSessionQuiescence(t.Context())
 	require.NoError(t, err)
 	require.NoError(t, store.FinishSessionQuiescence(t.Context(), boundary,
-		&database.SessionTaskSnapshot{Atespace: "team-a", URI: "s3://snapshots/source", ContentScope: "DATA"}))
+		&database.SessionTaskSnapshot{Atespace: "team-a", Reference: "s3://snapshots/source", ContentScope: "DATA"}))
 	checkpoint, _, err := store.ReserveSessionCheckpoint(t.Context(), &apiv1alpha1.Checkpoint{Id: uuid.NewString(), SessionId: source.Id, HeadTaskId: string(task.ID)}, source.Creator, uuid.NewString())
 	require.NoError(t, err)
-	_, err = store.FinalizeSessionCheckpoint(t.Context(), checkpoint.Id, "tag-uid", "s3://snapshots/snapshot-1", "")
+	sourceTask := actors.actors[actorKey("team-a", axruntime.TaskName(source.Id))]
+	ref := axruntime.ReferenceFromTask(sourceTask)
+	ref.Checkpoint = &ax.ResourceRef{Atespace: "team-a", Name: "checkpoint-" + checkpoint.Id, Uid: "checkpoint-uid"}
+	encoded, err := ref.Encode()
+	require.NoError(t, err)
+	if actors.checkpoints == nil {
+		actors.checkpoints = map[string]*ax.TaskCheckpoint{}
+	}
+	actors.checkpoints[ref.Checkpoint.Name] = &ax.TaskCheckpoint{Metadata: &ax.ObjectMeta{Atespace: "team-a", Name: ref.Checkpoint.Name, Uid: ref.Checkpoint.Uid}, SourceTask: ref.Task, RuntimeRef: ref.Runtime, GroupRef: ref.Group, BoundaryRef: ref.BoundaryRef, Phase: "Ready"}
+	_, err = store.FinalizeSessionCheckpoint(t.Context(), checkpoint.Id, "checkpoint-uid", encoded, "")
 	require.NoError(t, err)
 	requestID := uuid.NewString()
 	fork, _, err := store.ForkSession(t.Context(), checkpoint.Id, source.Creator, requestID, uuid.NewString())
@@ -298,96 +308,22 @@ func lifecycleForkFixture(t *testing.T, store *lifecycleTestStore, actors *lifec
 	return fork, checkpoint.Id
 }
 
-func (a *lifecycleTestActors) EnsureActorEgressPolicy(_ context.Context, atespace, name string, policy *ateapipb.EgressPolicy) error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.policyActor = actorKey(atespace, name)
-	a.policy = proto.CloneOf(policy)
-	a.policyCalls++
-	return a.policyErr
-}
-
-func TestActorCreationRetainsEgressPolicyFailure(t *testing.T) {
-	for _, name := range []string{"create", "fork"} {
-		t.Run(name, func(t *testing.T) {
-			store, session := lifecycleFixture(t)
-			base := &lifecycleTestActors{actors: map[string]*ateapipb.Actor{}}
-			if name == "fork" {
-				session, _ = lifecycleForkFixture(t, store, base, session)
-			}
-			actors := &retryTestActors{lifecycleTestActors: base}
-			workflow := NewActorWorkflow(store, actors)
-			callsBefore := base.policyCalls
-			store.revision.EgressDestinations = []string{"*"}
-			_, err := workflow.Create(t.Context(), session)
-			require.ErrorContains(t, err, "invalid egress destination")
-			require.Zero(t, actors.mutations.Load(), "validate the allowlist before issuing Actor creation")
-			require.Equal(t, callsBefore, base.policyCalls)
-
-			store.revision.EgressDestinations = []string{"api.example.com", "192.0.2.1"}
-			store.revision.Credentials = []egress.Credential{{Hostname: "api.example.com", Header: "authorization", Prefix: "Bearer ", URI: "ate-secret://k8s.io/default/team-a/auth/token"}}
-			base.policyErr = context.DeadlineExceeded
-			_, err = workflow.Create(t.Context(), session)
-			require.ErrorIs(t, err, context.DeadlineExceeded)
-			current, err := store.GetSessionByID(t.Context(), session.Id)
-			require.NoError(t, err)
-			require.Equal(t, apiv1alpha1.RuntimeState_RUNTIME_STATE_CREATING, current.State)
-			require.Empty(t, current.A2AAuthority)
-			require.Equal(t, actorKey("team-a", substrate.ActorName(session.Id)), base.policyActor)
-			require.Equal(t, &ateapipb.ResourceMetadata{Atespace: "team-a", Name: "default"}, base.policy.Metadata)
-			require.Len(t, base.policy.Rules, 3)
-			require.Equal(t, &ateapipb.CredentialHeaderInjection{Header: "authorization", Prefix: "Bearer ", CredentialUri: "ate-secret://k8s.io/default/team-a/auth/token"}, base.policy.Rules[0].GetHostnames().GetEffects().GetInjectStaticHeaders()[0])
-			require.Equal(t, []string{"api.example.com"}, base.policy.Rules[0].GetHostnames().GetPatterns())
-			require.Equal(t, []string{"192.0.2.1/32"}, base.policy.Rules[2].GetCidrs().GetCidrs())
-
-			// Retry completes policy setup for the existing Actor before readiness.
-			base.policyErr = nil
-			ready, err := workflow.Create(t.Context(), session)
-			require.NoError(t, err)
-			require.Equal(t, apiv1alpha1.RuntimeState_RUNTIME_STATE_READY, ready.State)
-			require.EqualValues(t, 1, actors.mutations.Load())
-			require.Equal(t, callsBefore+2, base.policyCalls)
-		})
-	}
-}
-
-func TestActorEgressPolicy(t *testing.T) {
-	policy, err := substrate.ActorEgressPolicy("team-a", []string{"API.Example.com.", "api.example.com", "192.0.2.1", "2001:db8::1", "::ffff:192.0.2.1"}, nil)
+func TestTaskCreationRetainsPreparationFailure(t *testing.T) {
+	store, session := lifecycleFixture(t)
+	runtime := &lifecycleTestActors{actors: map[string]*ax.Task{}, prepareErr: status.Error(codes.Unavailable, "AX not ready")}
+	_, err := NewTaskWorkflow(store, runtime).Create(t.Context(), session)
+	require.Error(t, err)
+	require.Empty(t, runtime.actors)
+	runtime.prepareErr = nil
+	_, err = NewTaskWorkflow(store, runtime).Create(t.Context(), session)
 	require.NoError(t, err)
-	require.Equal(t, &ateapipb.ResourceMetadata{Atespace: "team-a", Name: "default"}, policy.Metadata)
-	require.Len(t, policy.Rules, 2)
-	require.Equal(t, []string{"api.example.com"}, policy.Rules[0].GetHostnames().GetPatterns())
-	require.Equal(t, []string{"192.0.2.1/32", "2001:db8::1/128"}, policy.Rules[1].GetCidrs().GetCidrs())
-	policy, err = substrate.ActorEgressPolicy("team-a", nil, nil)
-	require.NoError(t, err)
-	require.Empty(t, policy.Rules, "no destinations must deny all egress")
-	for _, destination := range []string{"", "*", "https://api.example.com", "api.example.com:443", "192.0.2.0/24", "fe80::1%eth0"} {
-		t.Run(destination, func(t *testing.T) {
-			_, err := substrate.ActorEgressPolicy("team-a", []string{destination}, nil)
-			require.Error(t, err)
-		})
-	}
-}
-
-func TestActorEgressCredentialsRequireAllowedDestination(t *testing.T) {
-	bindings := []egress.Credential{
-		{Hostname: "api.example.com", Header: "authorization", Prefix: "Bearer ", URI: "ate-secret://k8s.io/default/team/auth/token"},
-		{Hostname: "api.example.com", Header: "x-api-key", URI: "ate-secret://k8s.io/default/team/auth/key"},
-	}
-	_, err := substrate.ActorEgressPolicy("team", []string{"other.example.com"}, bindings)
-	require.ErrorContains(t, err, "is not allowed")
-	policy, err := substrate.ActorEgressPolicy("team", []string{"api.example.com", "other.example.com"}, bindings)
-	require.NoError(t, err)
-	require.Len(t, policy.Rules, 2)
-	require.Equal(t, []string{"api.example.com"}, policy.Rules[0].GetHostnames().GetPatterns())
-	require.Len(t, policy.Rules[0].GetHostnames().GetEffects().GetInjectStaticHeaders(), 2)
-	require.Nil(t, policy.Rules[1].GetHostnames().GetEffects(), "the broad allow rule must not bypass injection")
+	require.Len(t, runtime.actors, 1)
 }
 
 func TestServiceLifecycleRetriesUseCurrentStateAndRespectDeletion(t *testing.T) {
 	store, fixture := lifecycleFixture(t)
-	actors := &retryTestActors{lifecycleTestActors: &lifecycleTestActors{actors: map[string]*ateapipb.Actor{}}}
-	service := NewService(store, serviceTestAuthorizer{}, NewActorWorkflow(store, actors))
+	actors := &retryTestActors{lifecycleTestActors: &lifecycleTestActors{actors: map[string]*ax.Task{}}}
+	service := NewService(store, serviceTestAuthorizer{}, NewTaskWorkflow(store, actors))
 	ctx := serviceTestContext("alice")
 	session, err := service.Create(ctx, fixture.Agent, "retry-request", "conversation")
 	require.NoError(t, err)
@@ -413,4 +349,42 @@ func TestServiceLifecycleRetriesUseCurrentStateAndRespectDeletion(t *testing.T) 
 	_, err = service.Resume(ctx, session.Id)
 	require.True(t, serviceerrors.IsCode(err, serviceerrors.CodeNotFound))
 	require.Equal(t, mutations, actors.mutations.Load(), "a tombstoned request must not create or touch compute")
+}
+
+type asynchronousBoundary struct {
+	*lifecycleTestActors
+	pending   bool
+	refreshed int
+}
+
+func (a *asynchronousBoundary) SuspendTask(ctx context.Context, req *ax.SuspendTaskRequest, opts ...grpc.CallOption) (*ax.Task, error) {
+	task, err := a.lifecycleTestActors.SuspendTask(ctx, req, opts...)
+	if err == nil {
+		a.pending = true
+		task = proto.CloneOf(task)
+		task.Status.RuntimeStatus.Phase = "Transitioning"
+	}
+	return task, err
+}
+func (a *asynchronousBoundary) GetTask(ctx context.Context, req *ax.GetTaskRequest, opts ...grpc.CallOption) (*ax.Task, error) {
+	if a.pending {
+		a.refreshed++
+		requireRefresh := req.RefreshRuntime
+		if !requireRefresh {
+			return nil, status.Error(codes.InvalidArgument, "refresh required")
+		}
+	}
+	return a.lifecycleTestActors.GetTask(ctx, req, opts...)
+}
+func TestQuiescenceWaitsForAcknowledgedAXBoundary(t *testing.T) {
+	store, session := lifecycleFixture(t)
+	runtime := &asynchronousBoundary{lifecycleTestActors: &lifecycleTestActors{actors: map[string]*ax.Task{}}}
+	workflow := NewTaskWorkflow(store, runtime)
+	created, err := workflow.Create(t.Context(), session)
+	require.NoError(t, err)
+	runtime.actors[actorKey("team-a", axruntime.TaskName(session.Id))].Status.RuntimeStatus.Phase = "Running"
+	boundary, err := workflow.Quiesce(t.Context(), created)
+	require.NoError(t, err)
+	require.NotEmpty(t, boundary.Reference)
+	require.Positive(t, runtime.refreshed)
 }

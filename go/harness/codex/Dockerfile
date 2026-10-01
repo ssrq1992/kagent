@@ -4,16 +4,18 @@ FROM --platform=$BUILDPLATFORM ${BASE_IMAGE_REGISTRY}/chainguard/go:latest AS bu
 ARG TARGETARCH
 ARG TARGETOS
 
-WORKDIR /workspace
-COPY go.mod go.sum ./
+WORKDIR /workspace/kagent/go
+# Build context is kagentOnAx: the local AX replacement must exist in images.
+COPY ax/ /workspace/ax/
+COPY kagent/go/go.mod kagent/go/go.sum ./
 RUN --mount=type=cache,target=/root/go/pkg/mod,rw \
     --mount=type=cache,target=/root/.cache/go-build,rw \
     go mod download
-COPY api/ api/
-COPY adk/ adk/
-COPY core/ core/
-COPY harness/ harness/
-COPY pkg/ pkg/
+COPY kagent/go/api/ api/
+COPY kagent/go/adk/ adk/
+COPY kagent/go/core/ core/
+COPY kagent/go/harness/ harness/
+COPY kagent/go/pkg/ pkg/
 RUN --mount=type=cache,target=/root/go/pkg/mod,rw \
     --mount=type=cache,target=/root/.cache/go-build,rw \
     CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \

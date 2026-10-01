@@ -7,16 +7,18 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
+	ax "github.com/google/ax/pkg/apis/v1alpha1"
 	apiv1alpha1 "github.com/kagent-dev/kagent/go/api/gen/kagent/api/v1alpha1"
+	"github.com/kagent-dev/kagent/go/core/internal/axruntime"
 	"github.com/kagent-dev/kagent/go/core/internal/database"
 	"github.com/kagent-dev/kagent/go/core/internal/service/serviceerrors"
-	"github.com/kagent-dev/kagent/go/core/internal/substrate"
 	"github.com/kagent-dev/kagent/go/core/pkg/auth"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/genproto/googleapis/rpc/errdetails"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -51,7 +53,12 @@ func (s *testStore) ReserveSessionCheckpoint(_ context.Context, checkpoint *apiv
 	}
 	checkpoint.HeadTaskId = "task-1"
 	checkpoint.HistorySequence = 7
-	s.snapshot = &database.SessionTaskSnapshot{Atespace: "team-a", URI: "s3://snapshots/snapshot-1", ContentScope: "DATA"}
+	ref := checkpointSource(checkpoint.SessionId)
+	encoded, err := ref.Encode()
+	if err != nil {
+		return nil, nil, err
+	}
+	s.snapshot = &database.SessionTaskSnapshot{Atespace: "team-a", Reference: encoded, ContentScope: "DATA"}
 	checkpoint.State = apiv1alpha1.CheckpointState_CHECKPOINT_STATE_CREATING
 	checkpoint.CreatedAt = timestamppb.Now()
 	s.prepared = checkpoint
@@ -66,7 +73,7 @@ func (s *testStore) FinalizeSessionCheckpoint(_ context.Context, _ string, tagUI
 		s.prepared.State, s.failed = apiv1alpha1.CheckpointState_CHECKPOINT_STATE_FAILED, failure
 	} else {
 		s.prepared.State, s.tagUID = apiv1alpha1.CheckpointState_CHECKPOINT_STATE_READY, tagUID
-		s.snapshot.URI = snapshotURI
+		s.snapshot.Reference = snapshotURI
 	}
 	return s.prepared, nil
 }
@@ -135,73 +142,50 @@ func (w *testWorkflow) Create(_ context.Context, session *apiv1alpha1.Session) (
 }
 
 type testTags struct {
-	createCalls            int
-	snapshotURI            string
-	snapshotURIAfterCreate string
-	actorUIDAfterCreate    string
-	created                *ateapipb.Tag
-	deleteCalls            int
-	getErr                 error
-	createErr              error
-	deleteErr              error
-	actorErr               error
-	mutateTag              func(*ateapipb.Tag)
+	ax.AXClient
+	createCalls, deleteCalls     int
+	created                      *ax.TaskCheckpoint
+	createErr, deleteErr, getErr error
+	mutate                       func(*ax.TaskCheckpoint)
 }
 
-func (t *testTags) GetActor(_ context.Context, atespace, name string) (*ateapipb.Actor, error) {
-	if t.actorErr != nil {
-		return nil, t.actorErr
-	}
-	uri := t.snapshotURI
-	if t.created != nil && t.snapshotURIAfterCreate != "" {
-		uri = t.snapshotURIAfterCreate
-	}
-	actorUID := "actor-uid"
-	if t.created != nil && t.actorUIDAfterCreate != "" {
-		actorUID = t.actorUIDAfterCreate
-	}
-	return &ateapipb.Actor{
-		Metadata: &ateapipb.ResourceMetadata{Atespace: atespace, Name: name, Uid: actorUID},
-		Status: &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_SUSPENDED,
-			ExternalSnapshot: &ateapipb.ExternalSnapshot{SnapshotUri: uri, ContentScope: ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA, ActorTemplateUid: "template-uid"}},
-	}, nil
+func checkpointSource(id string) axruntime.Reference {
+	return axruntime.Reference{Version: 1, Task: &ax.ResourceRef{Atespace: "team-a", Name: axruntime.TaskName(id), Uid: "task-uid"}, Runtime: &ax.ResourceRef{Atespace: "team-a", Name: "runtime", Uid: "runtime-uid"}, Group: &ax.ResourceRef{Atespace: "team-a", Name: "default", Uid: "group-uid"}, BoundaryRef: "boundary-1"}
 }
-
-func (t *testTags) GetTag(context.Context, string, string) (*ateapipb.Tag, error) {
+func (t *testTags) CreateTaskCheckpoint(_ context.Context, r *ax.CreateTaskCheckpointRequest, _ ...grpc.CallOption) (*ax.TaskCheckpoint, error) {
+	if t.created == nil {
+		t.createCalls++
+		ref := checkpointSource("")
+		ref.Task = r.TaskRef
+		t.created = &ax.TaskCheckpoint{Metadata: &ax.ObjectMeta{Atespace: r.TaskRef.Atespace, Name: r.Name, Uid: "checkpoint-uid"}, SourceTask: proto.CloneOf(r.TaskRef), RuntimeRef: ref.Runtime, GroupRef: ref.Group, BoundaryRef: r.ExpectedBoundaryRef, Phase: "Ready"}
+		if t.mutate != nil {
+			t.mutate(t.created)
+		}
+	}
+	if t.createErr != nil {
+		return nil, t.createErr
+	}
+	return proto.CloneOf(t.created), nil
+}
+func (t *testTags) GetTaskCheckpoint(context.Context, *ax.GetTaskCheckpointRequest, ...grpc.CallOption) (*ax.TaskCheckpoint, error) {
 	if t.getErr != nil {
 		return nil, t.getErr
 	}
 	if t.created == nil {
 		return nil, status.Error(codes.NotFound, "missing")
 	}
-	return t.created, nil
+	return proto.CloneOf(t.created), nil
 }
-
-func (t *testTags) CreateTag(_ context.Context, atespace, name, actorName string) (*ateapipb.Tag, error) {
-	t.createCalls++
-	if t.created != nil {
-		return nil, status.Error(codes.AlreadyExists, "exists")
-	}
-	t.created = &ateapipb.Tag{
-		Metadata:    &ateapipb.ResourceMetadata{Atespace: atespace, Name: name, Uid: "tag-uid"},
-		SourceActor: &ateapipb.ObjectRef{Atespace: atespace, Name: actorName},
-		Scope:       ateapipb.TagScope_TAG_SCOPE_ATESPACE,
-		Status: &ateapipb.TagStatus{ActorTemplateUid: "template-uid",
-			Snapshot: &ateapipb.ExternalSnapshot{SnapshotUri: "s3://tags/checkpoint", ContentScope: ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA}},
-	}
-	if t.mutateTag != nil {
-		t.mutateTag(t.created)
-	}
-	return t.created, t.createErr
-}
-
-func (t *testTags) DeleteTag(context.Context, string, string) error {
+func (t *testTags) DeleteTaskCheckpoint(_ context.Context, r *ax.DeleteTaskCheckpointRequest, _ ...grpc.CallOption) (*ax.DeleteTaskCheckpointResponse, error) {
 	t.deleteCalls++
 	if t.deleteErr != nil {
-		return t.deleteErr
+		return nil, t.deleteErr
+	}
+	if t.created != nil && !proto.Equal(ax.Ref(t.created.Metadata), r.Ref) {
+		return nil, status.Error(codes.FailedPrecondition, "UID changed")
 	}
 	t.created = nil
-	return nil
+	return &ax.DeleteTaskCheckpointResponse{}, nil
 }
 
 func TestCreatePreservesStoreConflictReason(t *testing.T) {
@@ -256,183 +240,123 @@ func TestRenameValidatesBeforeReachingTheStore(t *testing.T) {
 	require.Equal(t, "Before the detour", renamed.GetName())
 }
 
-func TestCreateTagsRecordedSnapshotBoundary(t *testing.T) {
-	store := &testStore{snapshotErr: fmt.Errorf("creation must use the reserved snapshot")}
-	tags := &testTags{snapshotURI: "s3://snapshots/snapshot-1"}
-	service := NewService(store, testAuthorizer{}, tags, nil)
-	ctx := auth.AuthSessionTo(context.Background(), testSession{userID: "alice"})
+const sourceSessionID = "018f47a2-4efb-7c21-a848-123456789abc"
 
-	checkpoint, err := service.Create(ctx, "018f47a2-4efb-7c21-a848-123456789abc", "request-1", "task-1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if checkpoint.GetHeadTaskId() != "task-1" || checkpoint.GetHistorySequence() != 7 || checkpoint.GetState().String() != "CHECKPOINT_STATE_READY" {
-		t.Fatalf("unexpected checkpoint: %+v", checkpoint)
-	}
-	if tags.created.GetSourceActor().GetName() != substrate.ActorName(checkpoint.GetSessionId()) ||
-		store.snapshot.URI != "s3://tags/checkpoint" || store.tagUID != "tag-uid" {
-		t.Fatalf("tag does not retain recorded snapshot: %+v", tags.created)
-	}
+func checkpointContext(t *testing.T) context.Context {
+	return auth.AuthSessionTo(t.Context(), testSession{userID: "alice"})
 }
-
-func TestCreateCleansTagBeforeFailing(t *testing.T) {
-	for _, test := range []struct {
-		name                   string
-		snapshotURIAfterCreate string
-		actorUIDAfterCreate    string
-	}{
-		{name: "snapshot changed", snapshotURIAfterCreate: "s3://snapshots/snapshot-2"},
-		{name: "actor replaced", actorUIDAfterCreate: "other-actor-uid"},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			store := &testStore{}
-			tags := &testTags{snapshotURI: "s3://snapshots/snapshot-1", snapshotURIAfterCreate: test.snapshotURIAfterCreate, actorUIDAfterCreate: test.actorUIDAfterCreate}
-			service := NewService(store, testAuthorizer{}, tags, nil)
-			ctx := auth.AuthSessionTo(t.Context(), testSession{userID: "alice"})
-
-			_, err := service.Create(ctx, "018f47a2-4efb-7c21-a848-123456789abc", "request-1", "task-1")
-			require.Error(t, err)
-			require.Equal(t, 1, tags.deleteCalls)
-			require.NotEmpty(t, store.failed)
-		})
-	}
-}
-
-func TestDeleteHidesCheckpointBeforeDeletingTag(t *testing.T) {
-	checkpoint := &apiv1alpha1.Checkpoint{Id: "018f47a2-4efb-7c21-a848-123456789abc", State: apiv1alpha1.CheckpointState_CHECKPOINT_STATE_READY}
-	store := &testStore{prepared: checkpoint, snapshot: &database.SessionTaskSnapshot{Atespace: "team-a", URI: "s3://snapshots/snapshot-1"}, tagUID: "tag-uid"}
-	tags := &testTags{created: &ateapipb.Tag{
-		Metadata: &ateapipb.ResourceMetadata{Atespace: "team-a", Name: tagName(checkpoint.GetId()), Uid: "tag-uid"},
-		Status:   &ateapipb.TagStatus{Snapshot: &ateapipb.ExternalSnapshot{SnapshotUri: "s3://snapshots/snapshot-1", ContentScope: ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA}},
-	}}
-	service := NewService(store, testAuthorizer{}, tags, nil)
-	ctx := auth.AuthSessionTo(context.Background(), testSession{userID: "alice"})
-
-	store.snapshotErr = fmt.Errorf("deletion must use the snapshot returned by BeginDelete")
-	tags.getErr = fmt.Errorf("tag lookup unavailable")
-	if err := service.Delete(ctx, checkpoint.GetId()); err == nil {
-		t.Fatal("Delete() succeeded without verifying the snapshot tag")
-	}
-	if checkpoint.State != apiv1alpha1.CheckpointState_CHECKPOINT_STATE_DELETING || tags.deleteCalls != 0 || store.deleted {
-		t.Fatal("tag lookup failure must leave deletion pending without deleting the tag")
-	}
-	tags.getErr = nil
-	if err := service.Delete(ctx, checkpoint.GetId()); err != nil {
-		t.Fatal(err)
-	}
-	if checkpoint.State != apiv1alpha1.CheckpointState_CHECKPOINT_STATE_DELETING || tags.deleteCalls != 1 || !store.deleted {
-		t.Fatalf("checkpoint state = %s, tag deletes = %d, row deleted = %v", checkpoint.State, tags.deleteCalls, store.deleted)
-	}
-}
-func TestForkCreatesSessionFromCheckpoint(t *testing.T) {
-	checkpoint := &apiv1alpha1.Checkpoint{Id: "018f47a2-4efb-7c21-a848-123456789abc", State: apiv1alpha1.CheckpointState_CHECKPOINT_STATE_READY}
-	store := &testStore{prepared: checkpoint, snapshot: &database.SessionTaskSnapshot{Atespace: "team-a", URI: "s3://snapshots/snapshot-1", ContentScope: "DATA"}}
-	workflow := &testWorkflow{}
-	store.tagUID = "tag-uid"
-	tags := &testTags{created: &ateapipb.Tag{Metadata: &ateapipb.ResourceMetadata{Atespace: "team-a", Name: tagName(checkpoint.Id), Uid: store.tagUID}, Status: &ateapipb.TagStatus{Snapshot: &ateapipb.ExternalSnapshot{SnapshotUri: store.snapshot.URI, ContentScope: ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA}}}, actorErr: errors.New("source Actor was deleted")}
-	service := NewService(store, testAuthorizer{}, tags, workflow)
-	ctx := auth.AuthSessionTo(context.Background(), testSession{userID: "alice"})
-
-	session, err := service.Fork(ctx, checkpoint.GetId(), "fork-request")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if session.GetState() != apiv1alpha1.RuntimeState_RUNTIME_STATE_READY ||
-		workflow.session != store.forked || store.forked.GetId() == "" {
-		t.Fatalf("fork = %+v, checkpoint = %+v", session, checkpoint)
-	}
-}
-
-func TestCreateRetriesRetainedTagAfterPublishFailure(t *testing.T) {
-	store := &testStore{finalizeErr: errors.New("database unavailable")}
-	tags := &testTags{snapshotURI: "s3://snapshots/snapshot-1", createErr: status.Error(codes.DeadlineExceeded, "response lost")}
-	service := NewService(store, testAuthorizer{}, tags, nil)
-	ctx := auth.AuthSessionTo(t.Context(), testSession{userID: "alice"})
-	_, err := service.Create(ctx, "018f47a2-4efb-7c21-a848-123456789abc", "request-1", "task-1")
-	require.Error(t, err)
-	require.Equal(t, apiv1alpha1.CheckpointState_CHECKPOINT_STATE_CREATING, store.prepared.State)
-	require.Equal(t, 0, tags.deleteCalls)
-	retained := tags.created
-	store.finalizeErr = nil
-	checkpoint, err := service.Create(ctx, store.prepared.SessionId, "request-1", "task-1")
+func TestCreateRetainsRecordedAXBoundary(t *testing.T) {
+	store := &testStore{snapshotErr: errors.New("must use reserved boundary")}
+	runtime := &testTags{}
+	checkpoint, err := NewService(store, testAuthorizer{}, runtime, nil).Create(checkpointContext(t), sourceSessionID, "request", "task-1")
 	require.NoError(t, err)
-	require.Same(t, retained, tags.created)
+	require.EqualValues(t, 7, checkpoint.HistorySequence)
+	require.Equal(t, "task-1", checkpoint.HeadTaskId)
+	ref, err := axruntime.DecodeReference(store.snapshot.Reference)
+	require.NoError(t, err)
+	require.True(t, proto.Equal(ref.Task, checkpointSource(sourceSessionID).Task))
+	require.Equal(t, "boundary-1", ref.BoundaryRef)
+	require.Equal(t, "checkpoint-uid", ref.Checkpoint.Uid)
 	require.Equal(t, apiv1alpha1.CheckpointState_CHECKPOINT_STATE_READY, checkpoint.State)
-	require.Equal(t, "s3://tags/checkpoint", store.snapshot.URI)
 }
-
-func TestCreateRejectsInvalidTagAndKeepsCleanupRetryable(t *testing.T) {
-	cases := []struct {
-		name   string
-		mutate func(*ateapipb.Tag)
-	}{
-		{"incomplete copy", func(tag *ateapipb.Tag) { tag.Status.Snapshot = nil }},
-		{"wrong source", func(tag *ateapipb.Tag) { tag.SourceActor.Name = "other" }},
-		{"wrong template", func(tag *ateapipb.Tag) { tag.Status.ActorTemplateUid = "other" }},
-		{"missing template", func(tag *ateapipb.Tag) { tag.Status.ActorTemplateUid = "" }},
-		{"wrong scope", func(tag *ateapipb.Tag) {
-			tag.Status.Snapshot.ContentScope = ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL
-		}},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			store := &testStore{}
-			tags := &testTags{snapshotURI: "s3://snapshots/snapshot-1", mutateTag: tc.mutate, deleteErr: errors.New("cleanup unavailable")}
-			service := NewService(store, testAuthorizer{}, tags, nil)
-			ctx := auth.AuthSessionTo(t.Context(), testSession{userID: "alice"})
-			_, err := service.Create(ctx, "018f47a2-4efb-7c21-a848-123456789abc", "request-1", "task-1")
+func TestCheckpointUnknownResponseAndPublishFailureRetainIntent(t *testing.T) {
+	store := &testStore{finalizeErr: errors.New("database unavailable")}
+	runtime := &testTags{createErr: status.Error(codes.Unavailable, "response lost")}
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt == 1 {
+			runtime.createErr = nil
+		}
+		if attempt == 2 {
+			store.finalizeErr = nil
+		}
+		checkpoint, err := NewService(store, testAuthorizer{}, runtime, nil).Create(checkpointContext(t), sourceSessionID, "request", "task-1")
+		if attempt < 2 {
 			require.Error(t, err)
 			require.Equal(t, apiv1alpha1.CheckpointState_CHECKPOINT_STATE_CREATING, store.prepared.State)
-			tags.deleteErr = nil
-			_, err = service.Create(ctx, store.prepared.SessionId, "request-1", "task-1")
-			require.Error(t, err)
-			require.Equal(t, apiv1alpha1.CheckpointState_CHECKPOINT_STATE_FAILED, store.prepared.State)
-			require.Nil(t, tags.created)
-		})
+		} else {
+			require.NoError(t, err)
+			require.Equal(t, apiv1alpha1.CheckpointState_CHECKPOINT_STATE_READY, checkpoint.State)
+		}
+		require.Zero(t, runtime.deleteCalls)
+		require.Equal(t, 1, runtime.createCalls)
 	}
 }
-
-func TestForkRejectsReplacedTag(t *testing.T) {
-	checkpoint := &apiv1alpha1.Checkpoint{Id: "018f47a2-4efb-7c21-a848-123456789abc"}
-	snapshot := &database.SessionTaskSnapshot{Atespace: "team-a", URI: "s3://tags/checkpoint", ContentScope: "DATA"}
-	for _, tc := range []struct{ name, uid, uri string }{
-		{"recreated tag", "other-uid", snapshot.URI},
-		{"different snapshot", "tag-uid", "s3://tags/other"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			store := &testStore{prepared: checkpoint, snapshot: snapshot, tagUID: "tag-uid"}
-			tags := &testTags{created: &ateapipb.Tag{
-				Metadata: &ateapipb.ResourceMetadata{Atespace: snapshot.Atespace, Name: tagName(checkpoint.Id), Uid: tc.uid},
-				Status:   &ateapipb.TagStatus{Snapshot: &ateapipb.ExternalSnapshot{SnapshotUri: tc.uri, ContentScope: ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA}},
-			}}
-			service := NewService(store, testAuthorizer{}, tags, &testWorkflow{})
-			ctx := auth.AuthSessionTo(t.Context(), testSession{userID: "alice"})
-			_, err := service.Fork(ctx, checkpoint.Id, "fork-request")
-			require.Error(t, err)
-			require.Nil(t, store.forked)
-		})
-	}
-}
-
-func TestConcurrentCreateRetainsOneTag(t *testing.T) {
+func TestDeleteClosesAdmissionAndRetainsOnAXFailure(t *testing.T) {
 	store := &testStore{}
-	tags := &testTags{snapshotURI: "s3://snapshots/snapshot-1", mutateTag: func(*ateapipb.Tag) { runtime.Gosched() }}
-	service := NewService(store, testAuthorizer{}, tags, nil)
-	ctx := auth.AuthSessionTo(t.Context(), testSession{userID: "alice"})
+	runtime := &testTags{}
+	service := NewService(store, testAuthorizer{}, runtime, nil)
+	ctx := checkpointContext(t)
+	checkpoint, err := service.Create(ctx, sourceSessionID, "request", "task-1")
+	require.NoError(t, err)
+	runtime.deleteErr = errors.New("AX unavailable")
+	require.Error(t, service.Delete(ctx, checkpoint.Id))
+	require.Equal(t, apiv1alpha1.CheckpointState_CHECKPOINT_STATE_DELETING, checkpoint.State)
+	require.False(t, store.deleted)
+	runtime.deleteErr = nil
+	require.NoError(t, service.Delete(ctx, checkpoint.Id))
+	require.True(t, store.deleted)
+}
+func TestForkUsesRetainedCheckpointWithoutSourceTask(t *testing.T) {
+	store := &testStore{}
+	runtime := &testTags{}
+	workflow := &testWorkflow{}
+	service := NewService(store, testAuthorizer{}, runtime, workflow)
+	ctx := checkpointContext(t)
+	checkpoint, err := service.Create(ctx, sourceSessionID, "request", "task-1")
+	require.NoError(t, err)
+	session, err := service.Fork(ctx, checkpoint.Id, "fork-request")
+	require.NoError(t, err)
+	require.Same(t, session, workflow.session)
+	require.Equal(t, "alice", session.Creator)
+}
+func TestCheckpointRejectsChangedIdentityOrBoundary(t *testing.T) {
+	mutations := map[string]func(*ax.TaskCheckpoint){
+		"task UID":    func(c *ax.TaskCheckpoint) { c.SourceTask.Uid = "other" },
+		"runtime UID": func(c *ax.TaskCheckpoint) { c.RuntimeRef.Uid = "other" },
+		"group UID":   func(c *ax.TaskCheckpoint) { c.GroupRef.Uid = "other" },
+		"boundary":    func(c *ax.TaskCheckpoint) { c.BoundaryRef = "other" },
+		"incomplete":  func(c *ax.TaskCheckpoint) { c.Phase = "Preparing" },
+		"namespace":   func(c *ax.TaskCheckpoint) { c.Metadata.Atespace = "other" },
+	}
+	for name, mutate := range mutations {
+		t.Run(name, func(t *testing.T) {
+			store := &testStore{}
+			runtime := &testTags{mutate: mutate}
+			service := NewService(store, testAuthorizer{}, runtime, &testWorkflow{})
+			ctx := checkpointContext(t)
+			_, err := service.Create(ctx, sourceSessionID, "request", "task-1")
+			require.Error(t, err)
+			require.Zero(t, runtime.deleteCalls)
+			require.Equal(t, apiv1alpha1.CheckpointState_CHECKPOINT_STATE_CREATING, store.prepared.State)
+		})
+	}
+	for _, replace := range []func(*ax.TaskCheckpoint){func(c *ax.TaskCheckpoint) { c.Metadata.Uid = "replacement" }, mutations["boundary"]} {
+		store := &testStore{}
+		runtime := &testTags{}
+		service := NewService(store, testAuthorizer{}, runtime, &testWorkflow{})
+		ctx := checkpointContext(t)
+		checkpoint, err := service.Create(ctx, sourceSessionID, "request", "task-1")
+		require.NoError(t, err)
+		replace(runtime.created)
+		_, err = service.Fork(ctx, checkpoint.Id, "fork")
+		require.Error(t, err)
+		require.Nil(t, store.forked)
+	}
+}
+func TestConcurrentCreateRetainsOneCheckpoint(t *testing.T) {
+	store := &testStore{}
+	backend := &testTags{mutate: func(*ax.TaskCheckpoint) { runtime.Gosched() }}
+	service := NewService(store, testAuthorizer{}, backend, nil)
+	ctx := checkpointContext(t)
 	start := make(chan struct{})
 	results := make(chan error, 32)
 	for range cap(results) {
-		go func() {
-			<-start
-			_, err := service.Create(ctx, "018f47a2-4efb-7c21-a848-123456789abc", "request-1", "task-1")
-			results <- err
-		}()
+		go func() { <-start; _, err := service.Create(ctx, sourceSessionID, "request", "task-1"); results <- err }()
 	}
 	close(start)
 	for range cap(results) {
 		require.NoError(t, <-results)
 	}
-	require.Equal(t, 1, tags.createCalls)
-	require.Equal(t, 0, tags.deleteCalls)
-	require.Equal(t, "s3://tags/checkpoint", store.snapshot.URI)
+	require.Equal(t, 1, backend.createCalls)
+	require.Zero(t, backend.deleteCalls)
 }

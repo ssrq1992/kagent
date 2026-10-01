@@ -1,7 +1,6 @@
 import {
   Bot,
   CalendarClock,
-  Boxes,
   Cpu,
   LayoutDashboard,
   MessageSquareText,
@@ -49,12 +48,5 @@ export const coreNavItems: NavItem[] = [
     path: paths.prompts,
     icon: MessageSquareText,
     order: 500,
-  },
-  {
-    key: "substrate",
-    label: "Substrate",
-    path: paths.substrate,
-    icon: Boxes,
-    order: 600,
   },
 ];

@@ -165,9 +165,9 @@ const INPUTS = {
         workload: {
           image: `ghcr.io/example/runtime@sha256:${"a".repeat(64)}`,
         },
-        substrate: {
-          workerPoolRef: { name: "kagent-default" },
-          snapshotPolicy: { location: "gs://snapshots/kagent/" },
+        ax: {
+          taskGroupRef: { name: "kagent-default" },
+          snapshotLocationOverride: "gs://snapshots/kagent/",
         },
       },
     },
@@ -241,9 +241,7 @@ const INPUTS = {
   "agentInstances.checkpoints.delete": { checkpointId: DISPOSABLE_CHECKPOINT.id },
 
   "namespaces.list": {},
-  "substrate.summary": {},
-  "substrate.actors": {},
-  "substrate.workers": {},
+  "taskGroups.list": { namespace: "kagent" },
 } satisfies { [K in OperationId]: OperationInput<K> };
 
 /** Runs one operation with the input above. */
@@ -271,31 +269,10 @@ describe("the fixture backend", () => {
     expect(failures.filter(Boolean)).toEqual([]);
   });
 
-  it("serves upstream substrate messages through the UI conversions", async () => {
-    const [summary, page] = await Promise.all([
-      invoke("substrate.summary", {}),
-      invoke("substrate.actors", {}),
-    ]);
-    expect(summary.actorTemplates[0]).toMatchObject({
-      name: "coder-template",
-      phase: "Ready",
-      sandboxClass: "gvisor",
-      workerSelector: "pool=kagent-default",
-    });
-    expect(summary.workerPools[0]).toMatchObject({ namespace: "kagent", name: "kagent-default", replicas: 3, ateomImage: "ghcr.io/ate-dev/ateom:1.4.0" });
-    expect(page.actors.find((actor) => actor.actorId === "actor-7f21")).toMatchObject({
-      atespace: "team-a", status: "Running", actorTemplateAtespace: "kagent", actorTemplateName: "coder-template",
-    });
-    expect(page.actors.find((actor) => actor.actorId === "actor-9c03")?.status).toBe("Suspending");
-  });
-
-  it("preserves continuation through a worker page with no namespace matches", async () => {
-    const first = await invoke("substrate.workers", { namespace: "platform", limit: 1 });
-    expect(first.workers).toEqual([]);
-    expect(first.nextPageToken).toBeDefined();
-    const last = await invoke("substrate.workers", { namespace: "platform", limit: 1, pageToken: first.nextPageToken });
-    expect(last.workers).toEqual([]);
-    expect(last.nextPageToken).toBeUndefined();
+  it("serves AX TaskGroup choices in the requested namespace", async () => {
+    const result = await invoke("taskGroups.list", { namespace: "platform" });
+    expect(result.groups).toHaveLength(2);
+    expect(result.groups[0]).toEqual({ namespace: "platform", name: "kagent-default", uid: "mock-platform-kagent-default", phase: "Ready", replicas: 3 });
   });
 
   /*

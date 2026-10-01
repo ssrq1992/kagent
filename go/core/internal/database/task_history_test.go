@@ -65,7 +65,7 @@ func TestTaskHistoryLimitsAndSessionScope(t *testing.T) {
 			message.ID = id + suffix
 			task.History = append(task.History, message)
 		}
-		require.NoError(t, saveRuntimeTask(t, client, session.Id, task, task, &SessionTaskSnapshot{Atespace: "team-a", URI: "snapshot-" + id, ContentScope: "DATA"}))
+		require.NoError(t, saveRuntimeTask(t, client, session.Id, task, task, &SessionTaskSnapshot{Atespace: "team-a", Reference: "snapshot-" + id, ContentScope: "DATA"}))
 	}
 	for _, test := range []struct {
 		name  string

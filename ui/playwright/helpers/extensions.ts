@@ -59,7 +59,6 @@ export const CORE_NAV_ORDER = [
   "nav-models",
   "nav-mcpServers",
   "nav-prompts",
-  "nav-substrate",
 ];
 
 /**

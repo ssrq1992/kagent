@@ -3,7 +3,7 @@ package grpcserver
 import (
 	"context"
 
-	guestpb "github.com/agent-substrate/env/proto/ateenv/v1alpha"
+	guestpb "github.com/google/ax/pkg/apis/v1alpha1"
 	sandboxapi "github.com/kagent-dev/kagent/go/api/sandbox"
 	"github.com/kagent-dev/kagent/go/core/internal/service/sandbox"
 	"google.golang.org/grpc"
@@ -13,14 +13,12 @@ import (
 )
 
 type sandboxGuestServer struct {
-	guestpb.UnimplementedProcessServiceServer
-	guestpb.UnimplementedFileSystemServiceServer
+	guestpb.UnimplementedTaskExecutionServiceServer
 	service *sandbox.Service
 }
 
 var (
-	_ guestpb.ProcessServiceServer    = (*sandboxGuestServer)(nil)
-	_ guestpb.FileSystemServiceServer = (*sandboxGuestServer)(nil)
+	_ guestpb.TaskExecutionServiceServer = (*sandboxGuestServer)(nil)
 )
 
 func sandboxID(ctx context.Context) (string, error) {

@@ -9,12 +9,11 @@ import (
 	"testing"
 	"time"
 
-	guestpb "github.com/agent-substrate/env/proto/ateenv/v1alpha"
+	guestpb "github.com/google/ax/pkg/apis/v1alpha1"
 	"github.com/google/uuid"
 	apiv1alpha1 "github.com/kagent-dev/kagent/go/api/gen/kagent/api/v1alpha1"
 	sandboxapi "github.com/kagent-dev/kagent/go/api/sandbox"
 	"github.com/kagent-dev/kagent/go/api/v1alpha3"
-	"github.com/kagent-dev/kagent/go/core/internal/substrate"
 	kagentenv "github.com/kagent-dev/kagent/go/core/pkg/env"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
@@ -33,8 +32,8 @@ import (
 type sandboxFixture struct {
 	ctx       context.Context
 	client    apiv1alpha1.SandboxServiceClient
-	processes guestpb.ProcessServiceClient
-	files     guestpb.FileSystemServiceClient
+	processes guestpb.TaskExecutionServiceClient
+	files     guestpb.TaskExecutionServiceClient
 	template  *apiv1alpha1.ResourceReference
 	system    apiv1alpha1.SystemServiceClient
 }
@@ -48,9 +47,9 @@ func newSandboxFixture(t *testing.T) *sandboxFixture {
 	if namespace == "" {
 		namespace = kagentenv.E2ESandboxNamespace.DefaultValue()
 	}
-	pool := kagentenv.E2ESandboxWorkerPool.Get()
+	pool := kagentenv.E2ESandboxTaskGroup.Get()
 	if pool == "" {
-		pool = kagentenv.E2ESandboxWorkerPool.DefaultValue()
+		pool = kagentenv.E2ESandboxTaskGroup.DefaultValue()
 	}
 	conn := newControllerConn(t, target)
 	ctx, cancel := context.WithTimeout(metadata.AppendToOutgoingContext(t.Context(), "x-user-id", "e2e"), 6*time.Minute)
@@ -59,9 +58,8 @@ func newSandboxFixture(t *testing.T) *sandboxFixture {
 	value, err := structpb.NewStruct(map[string]any{
 		"spec": map[string]any{
 			"workload": map[string]any{"image": image},
-			"substrate": map[string]any{
-				"workerPoolRef":  map[string]any{"name": pool},
-				"snapshotPolicy": map[string]any{"location": "s3://ate-snapshots/" + namespace},
+			"ax": map[string]any{
+				"taskGroupRef": map[string]any{"name": pool},
 			},
 		},
 	})
@@ -79,7 +77,7 @@ func newSandboxFixture(t *testing.T) *sandboxFixture {
 			require.NoError(t, err)
 		}
 	})
-	return &sandboxFixture{ctx: ctx, client: apiv1alpha1.NewSandboxServiceClient(conn), processes: guestpb.NewProcessServiceClient(conn), files: guestpb.NewFileSystemServiceClient(conn), template: ref, system: apiv1alpha1.NewSystemServiceClient(conn)}
+	return &sandboxFixture{ctx: ctx, client: apiv1alpha1.NewSandboxServiceClient(conn), processes: guestpb.NewTaskExecutionServiceClient(conn), files: guestpb.NewTaskExecutionServiceClient(conn), template: ref, system: apiv1alpha1.NewSystemServiceClient(conn)}
 }
 
 func (f *sandboxFixture) create(t *testing.T, ttl time.Duration) *apiv1alpha1.Sandbox {
@@ -334,13 +332,14 @@ func TestSandboxTemplateRevisionRetention(t *testing.T) {
 // This test requires an endpoint that survives pod replacement, such as a
 // NodePort or ingress; kubectl port-forward terminates with the original pod.
 func TestSandboxControllerRestart(t *testing.T) {
+	runtime := newAXRuntimeClient(t)
 	f := newSandboxFixture(t)
 	instance := f.create(t, 5*time.Minute)
 	process, err := f.processes.StartProcess(f.guestContext(instance.Id), &guestpb.StartProcessRequest{
 		Command: []string{"sh", "-c", "printf once >> restart-count; sleep 5; printf survived"},
 	})
 	require.NoError(t, err)
-	actor, err := findSubstrateActor(f.ctx, f.system, f.template.Namespace, substrate.ActorName(instance.Id))
+	actor, err := findAXTask(f.ctx, runtime, f.template.Namespace, "sandbox-"+instance.Id)
 	require.NoError(t, err)
 	require.NotNil(t, actor)
 	kube := interactionKubeClient(t)
@@ -375,7 +374,7 @@ func TestSandboxControllerRestart(t *testing.T) {
 		response, err := f.client.GetSandbox(f.ctx, &apiv1alpha1.GetSandboxRequest{SandboxId: instance.Id})
 		return err == nil && response.Sandbox.State == apiv1alpha1.RuntimeState_RUNTIME_STATE_READY
 	}, 90*time.Second, time.Second)
-	after, err := findSubstrateActor(f.ctx, f.system, f.template.Namespace, substrate.ActorName(instance.Id))
+	after, err := findAXTask(f.ctx, runtime, f.template.Namespace, "sandbox-"+instance.Id)
 	require.NoError(t, err)
 	require.Equal(t, actor.GetMetadata().GetUid(), after.GetMetadata().GetUid(), "controller restart must preserve compute")
 	finished, err := f.processes.GetProcess(f.guestContext(instance.Id), &guestpb.GetProcessRequest{ProcessId: process.ProcessId})

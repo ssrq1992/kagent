@@ -5,44 +5,64 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 
+	ax "github.com/google/ax/pkg/apis/v1alpha1"
 	"github.com/google/uuid"
-	apia2a "github.com/kagent-dev/kagent/go/api/a2a"
 	"github.com/kagent-dev/kagent/go/core/pkg/auth"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/peer"
 )
 
-// Authenticator temporarily trusts an unsigned actor identity header. Replace
-// this with Substrate-issued actor JWT verification when #1660 is available.
-// Session, atespace, and recorded actor UID checks remain in the service.
-type Authenticator struct{}
+// Authenticator verifies the credential injected by AX's HTTPS egress policy.
+// The namespace prefix routes verification; only AX's response grants identity.
+type Authenticator struct{ Runtime ax.AXClient }
 
 var _ auth.AuthProvider = (*Authenticator)(nil)
 
-func (*Authenticator) Authenticate(_ context.Context, headers http.Header, _ url.Values) (auth.Session, error) {
-	values := headers.Values(apia2a.InsecureRuntimeIdentityHeader)
-	if len(values) != 1 {
-		return nil, fmt.Errorf("one runtime identity header is required")
+func (a *Authenticator) Authenticate(ctx context.Context, headers http.Header, _ url.Values) (auth.Session, error) {
+	p, ok := peer.FromContext(ctx)
+	if !ok {
+		return nil, fmt.Errorf("runtime storage requires TLS")
 	}
-	parts := strings.Split(values[0], "/")
-	if len(parts) != 3 {
-		return nil, fmt.Errorf("runtime identity must be atespace/actor-name/actor-UID")
+	tlsInfo, ok := p.AuthInfo.(credentials.TLSInfo)
+	if !ok || !tlsInfo.State.HandshakeComplete {
+		return nil, fmt.Errorf("runtime storage requires TLS")
 	}
-	id, ok := strings.CutPrefix(parts[1], "session-")
-	if !ok || parts[0] == "" || parts[2] == "" {
-		return nil, fmt.Errorf("incomplete Substrate actor identity")
+	values := headers.Values(ax.RuntimeCredentialHeader)
+	if len(values) != 1 || a.Runtime == nil {
+		return nil, fmt.Errorf("one AX runtime credential is required")
 	}
-	if _, err := uuid.Parse(id); err != nil {
-		return nil, fmt.Errorf("invalid runtime session identity: %w", err)
+	space, err := ax.RuntimeCredentialAtespace(values[0])
+	if err != nil {
+		return nil, err
 	}
-	return runtimeSession{sessionID: id, atespace: parts[0], actorUID: parts[2]}, nil
+	verified, err := a.Runtime.AuthenticateRuntime(ctx, &ax.AuthenticateRuntimeRequest{Atespace: space, Credential: values[0]})
+	if err != nil {
+		return nil, err
+	}
+	ref := verified.GetTaskRef()
+	if err = ax.ValidateRef(ref, true); err != nil {
+		return nil, err
+	}
+	if ref.Atespace != space || !slices.Contains(verified.Scopes, "taskstore") {
+		return nil, fmt.Errorf("runtime has no TaskStore authority")
+	}
+	id, ok := strings.CutPrefix(ref.Name, "session-")
+	if !ok {
+		return nil, fmt.Errorf("runtime is not a Session")
+	}
+	if _, err = uuid.Parse(id); err != nil {
+		return nil, fmt.Errorf("invalid AX session identity")
+	}
+	return runtimeSession{sessionID: id, atespace: ref.Atespace, taskUID: ref.Uid}, nil
 }
-
 func (*Authenticator) UpstreamAuth(*http.Request, auth.Session, auth.Principal) error {
 	return fmt.Errorf("runtime authentication cannot forward public credentials")
 }
 
-type runtimeSession struct{ sessionID, atespace, actorUID string }
+type runtimeSession struct{ sessionID, atespace, taskUID string }
 
 func (s runtimeSession) Principal() auth.Principal {
 	return auth.Principal{Agent: auth.Agent{ID: s.sessionID}}

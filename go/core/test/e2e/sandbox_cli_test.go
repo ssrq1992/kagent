@@ -28,7 +28,7 @@ func TestSandboxCLI(t *testing.T) {
 		var out, stderr bytes.Buffer
 		cmd.SetOut(&out)
 		cmd.SetErr(&stderr)
-		cmd.SetArgs(append([]string{"--api-url", "http://" + interactionTarget(t), "--user-id", "e2e", "--namespace", f.template.Namespace, "--timeout", "2m", "sandbox"}, args...))
+		cmd.SetArgs(append([]string{"--api-url", "https://" + interactionTarget(t), "--user-id", "e2e", "--namespace", f.template.Namespace, "--timeout", "2m", "sandbox"}, args...))
 		err := cmd.ExecuteContext(t.Context())
 		if err != nil {
 			t.Logf("CLI stderr: %s", stderr.String())

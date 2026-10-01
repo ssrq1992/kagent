@@ -1,84 +1,30 @@
-# Standalone sandbox guest
+# AX sandbox Guest image
 
-This image builds kagent's [guest command](cmd/main.go), using the public
-`agent-substrate/env/guest` library at the version pinned in `go/go.mod`. Kagent
-owns the entrypoint, flags, logging, HTTP listener, readiness, and shutdown.
-Upstream provides the gRPC process and filesystem services. No AX code is used.
+The executable and pinned private Guest protocol are owned by the sibling AX
+module (`ax/cmd/ax-sandbox-guest`). kagent's CLI, SDK and MCP use AX's public
+`TaskExecutionService`; kagent does not import the private Guest library.
 
-The image provides the runtime for [standalone sandboxes](../../../docs/architecture/sandboxes.md). The control plane owns
-sandbox creation, authorization, expiration, persistence, and MCP access.
-Sessions do not run this guest.
+Build from the paired layout with `make build-sandbox-guest`. The Docker build
+context is the parent directory containing `kagent/` and `ax/`. Configure the
+resulting immutable image digest as AX's operator `guestImage`, not a kagent Helm
+value. AX mounts `/usr/local/bin/ax-sandbox-guest` from that image into the chosen
+Sandbox workload and invokes it on port 80 with workspace `/data/workspace` and
+logs `/data/guest-logs`.
 
-## Runtime contract
+AX exposes six process/file operations and validates the caller's mTLS identity,
+Task UID and runtime kind. The underlying Guest listener stays private; network
+access to it is a platform responsibility. No old Guest wire compatibility is
+provided to kagent clients: deploy the paired controller, CLI and SDK together.
 
-- The static binary is `/usr/local/bin/kagent-sandbox-guest`.
-- The daemon runs as UID/GID `65532:65532` and starts no agent runtime.
-- Port `80` serves both HTTP `GET /readyz` and plaintext HTTP/2 gRPC.
-- The upstream `ProcessService` and `FileSystemService` protocols are unchanged.
-- The default process working directory and file API root are `/data/workspace`.
-- Process output is spooled under `/data/guest-logs`.
-- Both directories must be writable by the runtime user when mounting `/data`.
-- Flags `--listen`, `--workspace`, and `--log-dir` override these defaults.
-- JSON logs go to stderr; `KAGENT_LOG_LEVEL` selects debug, info (default), warn, or error.
-- SIGINT/SIGTERM stop serving and disconnect active RPCs, including output
-  observers, before cleaning up the guest services and exiting.
+Run `go test ./core/internal/service/sandbox` from `kagent/go` with a real test
+PostgreSQL instance (`KAGENT_TEST_POSTGRES_DSN`) to exercise kagent API → AX mTLS
+→ Guest, including file transfer, limits, process exit and stream cancellation.
+`AX_TEST_RUNTIME_BINARY` may point to the locally built AX test fixture to avoid
+rebuilding it per test. Native golden snapshots, VM restores, placement and TTL
+survival across actual worker failure remain cluster acceptance tests.
 
-The guest is a private runtime endpoint, with no caller authentication or resource
-ownership enforcement. The kagent sandbox service authorizes and admits
-calls before routing them to it. The workspace path is a convenience boundary;
-processes can access files allowed by their OS permissions, and filesystem path
-checks do not provide isolation from symlinks. The Actor supplies isolation.
-
-The image includes Bash, Git, and CA certificates. Other workload images can copy
-the static binary and supply their own tools and writable directories:
-
-```dockerfile
-ARG GUEST_IMAGE
-FROM ${GUEST_IMAGE} AS guest
-FROM your-workload-image
-COPY --from=guest /usr/local/bin/kagent-sandbox-guest /usr/local/bin/kagent-sandbox-guest
-# Prepare /data/workspace and /data/guest-logs for this image's runtime user.
-ENTRYPOINT ["/usr/local/bin/kagent-sandbox-guest"]
-CMD ["--listen=:80", "--workspace=/data/workspace", "--log-dir=/data/guest-logs"]
-```
-
-Use an immutable guest image digest for reproducible packaging. SandboxTemplate
-preparation mounts that image and starts its binary in the selected tools image;
-copying it into each workload image is unnecessary. The launcher creates the
-workspace before readiness, including when `/data` masks the image's directories.
-
-## Build and verify
-
-From the repository root, build into the local Docker daemon without publishing:
-
-```sh
-make build-sandbox-guest \
-  SANDBOX_GUEST_IMG=kagent-sandbox-guest:dev \
-  DOCKER_BUILD_ARGS='--load --platform linux/amd64'
-```
-
-Use `linux/arm64` on an ARM host. Run the server tests from `go/`:
-
-```sh
-go test -race ./sandbox/guest/... -count=1 -v
-```
-
-The tests run the server in-process on a local listener and require no image or
-Docker daemon. They cover readiness, process service registration, file transfer
-in the configured workspace, startup failures, and cancellation-driven shutdown.
-The existing Go unit-test job runs them. The sandbox E2E suite also exercises the
-image through the Substrate router, preparation snapshots, and suspend/resume.
-
-## Upstream semantics
-
-Process identities and status are in memory. Restarting the guest loses the
-registry even if workspace files survive. Filesystem persistence does not resume
-processes or provide durable process results. `StartProcess` has no idempotency
-key; never blindly retry after an ambiguous response.
-
-The pinned service defaults to ten concurrent processes, a one-hour process
-timeout, and 10 MiB of output per stream. Output truncation, completed-process
-retention, partial file writes, and termination follow upstream behavior. In
-particular, writes replace the destination directly; an interrupted transfer can
-leave a partial file. Shutdown is not a checkpoint or a durable-completion
-protocol. These limits must remain explicit when adding the public sandbox API.
+Guest process identities are in memory. A process start is not idempotent; do not
+retry an ambiguous StartProcess response. Interrupted writes can leave a partial
+file. Workspace persistence does not imply process persistence or exactly-once
+execution. AX owns the backend mapping and documents these limits in its execution
+API; kagent preserves them in its CLI/SDK/MCP behavior.

@@ -226,10 +226,6 @@ init-git-hooks:  ## Use the tracked version of Git hooks from this repo
 KMCP_ENABLED ?= true
 KMCP_VERSION ?= $(shell $(AWK) '/github\.com\/kagent-dev\/kmcp/ { print substr($$2, 2) }' go/go.mod) # KMCP version defaults to what's referenced in go.mod
 
-# Substrate
-SUBSTRATE_ENABLED ?= false
-SUBSTRATE_VERSION ?= $(shell $(AWK) '/github\.com\/kagent-dev\/substrate/ { print substr($$5, 2) }' go/go.mod) # Substrate version defaults to the replace target in go.mod
-SUBSTRATE_REPO ?= oci://ghcr.io/kagent-dev/substrate/helm # Override for local dev when consuming a locally-published chart, e.g. oci://localhost:5001/kagent-dev/substrate/helm
 
 HELM_ACTION=upgrade --install
 
@@ -296,10 +292,10 @@ endif
 build-all: ## Build all images for amd64+arm64 without pushing (outputs to /dev/null for CI validation)
 build-all: BUILD_ARGS ?= --progress=plain --builder $(BUILDX_BUILDER_NAME) --platform linux/amd64,linux/arm64 --output type=tar,dest=/dev/null
 build-all: proto-generate buildx-create
-	$(DOCKER_BUILDER) $(BUILD_ARGS) $(TOOLS_IMAGE_BUILD_ARGS) -f go/Dockerfile     ./go
-	$(DOCKER_BUILDER) $(BUILD_ARGS) $(TOOLS_IMAGE_BUILD_ARGS) -f go/harness/claude/Dockerfile ./go
-	$(DOCKER_BUILDER) $(BUILD_ARGS) $(TOOLS_IMAGE_BUILD_ARGS) -f go/harness/codex/Dockerfile ./go
-	$(DOCKER_BUILDER) $(BUILD_ARGS) $(TOOLS_IMAGE_BUILD_ARGS) -f go/sandbox/guest/Dockerfile ./go
+	$(DOCKER_BUILDER) $(BUILD_ARGS) $(TOOLS_IMAGE_BUILD_ARGS) -f go/Dockerfile     ..
+	$(DOCKER_BUILDER) $(BUILD_ARGS) $(TOOLS_IMAGE_BUILD_ARGS) -f go/harness/claude/Dockerfile ..
+	$(DOCKER_BUILDER) $(BUILD_ARGS) $(TOOLS_IMAGE_BUILD_ARGS) -f go/harness/codex/Dockerfile ..
+	$(DOCKER_BUILDER) $(BUILD_ARGS) $(TOOLS_IMAGE_BUILD_ARGS) -f go/sandbox/guest/Dockerfile ..
 	$(DOCKER_BUILDER) $(BUILD_ARGS) $(TOOLS_IMAGE_BUILD_ARGS) -f ui/Dockerfile     ./ui
 	$(DOCKER_BUILDER) $(BUILD_ARGS) $(TOOLS_IMAGE_BUILD_ARGS) -f python/Dockerfile ./python
 
@@ -355,7 +351,7 @@ build-controller: ## Build and push the API v2 controller image
 build-controller: buildx-create
 	$(DOCKER_BUILDER) $(DOCKER_BUILD_ARGS) $(TOOLS_IMAGE_BUILD_ARGS) \
 		--build-arg BUILD_PACKAGE=core/cmd/controller/main.go \
-		-t $(CONTROLLER_IMG) -f go/Dockerfile ./go
+		-t $(CONTROLLER_IMG) -f go/Dockerfile ..
 	$(DOCKER_PUSH) $(CONTROLLER_IMG)
 
 .PHONY: build-ui
@@ -373,31 +369,31 @@ build-kagent-adk: proto-generate buildx-create
 .PHONY: build-golang-adk
 build-golang-adk: ## Build and push the Go ADK image
 build-golang-adk: proto-generate buildx-create
-	$(DOCKER_BUILDER) $(DOCKER_BUILD_ARGS) $(TOOLS_IMAGE_BUILD_ARGS) --build-arg BUILD_PACKAGE=adk/cmd/main.go -t $(GOLANG_ADK_IMG) -f go/Dockerfile ./go
+	$(DOCKER_BUILDER) $(DOCKER_BUILD_ARGS) $(TOOLS_IMAGE_BUILD_ARGS) --build-arg BUILD_PACKAGE=adk/cmd/main.go -t $(GOLANG_ADK_IMG) -f go/Dockerfile ..
 	$(DOCKER_PUSH) $(GOLANG_ADK_IMG)
 
 .PHONY: build-byo-a2a
 build-byo-a2a: ## Build and push the opaque BYO A2A e2e image
 build-byo-a2a: buildx-create
-	$(DOCKER_BUILDER) $(DOCKER_BUILD_ARGS) $(TOOLS_IMAGE_BUILD_ARGS) --build-arg BUILD_PACKAGE=core/test/byoa2a/main.go -t $(DOCKER_REGISTRY)/$(DOCKER_REPO)/byo-a2a:$(VERSION) -f go/Dockerfile ./go
+	$(DOCKER_BUILDER) $(DOCKER_BUILD_ARGS) $(TOOLS_IMAGE_BUILD_ARGS) --build-arg BUILD_PACKAGE=core/test/byoa2a/main.go -t $(DOCKER_REGISTRY)/$(DOCKER_REPO)/byo-a2a:$(VERSION) -f go/Dockerfile ..
 	$(DOCKER_PUSH) $(DOCKER_REGISTRY)/$(DOCKER_REPO)/byo-a2a:$(VERSION)
 
 .PHONY: build-claude-harness
 build-claude-harness: ## Build and push the native Claude Harness image
 build-claude-harness: buildx-create
-	$(DOCKER_BUILDER) $(DOCKER_BUILD_ARGS) $(TOOLS_IMAGE_BUILD_ARGS) -t $(CLAUDE_HARNESS_IMG) -f go/harness/claude/Dockerfile ./go
+	$(DOCKER_BUILDER) $(DOCKER_BUILD_ARGS) $(TOOLS_IMAGE_BUILD_ARGS) -t $(CLAUDE_HARNESS_IMG) -f go/harness/claude/Dockerfile ..
 	$(DOCKER_PUSH) $(CLAUDE_HARNESS_IMG)
 
 .PHONY: build-codex-harness
 build-codex-harness: ## Build and push the native Codex Harness image
 build-codex-harness: buildx-create
-	$(DOCKER_BUILDER) $(DOCKER_BUILD_ARGS) $(TOOLS_IMAGE_BUILD_ARGS) -t $(CODEX_HARNESS_IMG) -f go/harness/codex/Dockerfile ./go
+	$(DOCKER_BUILDER) $(DOCKER_BUILD_ARGS) $(TOOLS_IMAGE_BUILD_ARGS) -t $(CODEX_HARNESS_IMG) -f go/harness/codex/Dockerfile ..
 	$(DOCKER_PUSH) $(CODEX_HARNESS_IMG)
 
 .PHONY: build-sandbox-guest
 build-sandbox-guest: ## Build and push the standalone sandbox guest image
 build-sandbox-guest: buildx-create
-	$(DOCKER_BUILDER) $(DOCKER_BUILD_ARGS) $(TOOLS_IMAGE_BUILD_ARGS) -t $(SANDBOX_GUEST_IMG) -f go/sandbox/guest/Dockerfile ./go
+	$(DOCKER_BUILDER) $(DOCKER_BUILD_ARGS) $(TOOLS_IMAGE_BUILD_ARGS) -t $(SANDBOX_GUEST_IMG) -f go/sandbox/guest/Dockerfile ..
 	$(DOCKER_PUSH) $(SANDBOX_GUEST_IMG)
 
 .PHONY: push
@@ -459,8 +455,8 @@ helm-tools: ## Package all tool Helm charts into the dist folder
 .PHONY: helm-version
 helm-version: ## Stamp chart versions, update dependencies, and package kagent + kagent-crds
 helm-version: helm-cleanup helm-tools
-	VERSION=$(VERSION) KMCP_VERSION=$(KMCP_VERSION) SUBSTRATE_VERSION=$(SUBSTRATE_VERSION) SUBSTRATE_REPO=$(SUBSTRATE_REPO) envsubst < helm/kagent-crds/Chart-template.yaml > helm/kagent-crds/Chart.yaml
-	VERSION=$(VERSION) KMCP_VERSION=$(KMCP_VERSION) SUBSTRATE_VERSION=$(SUBSTRATE_VERSION) SUBSTRATE_REPO=$(SUBSTRATE_REPO) envsubst < helm/kagent/Chart-template.yaml > helm/kagent/Chart.yaml
+	VERSION=$(VERSION) KMCP_VERSION=$(KMCP_VERSION) envsubst < helm/kagent-crds/Chart-template.yaml > helm/kagent-crds/Chart.yaml
+	VERSION=$(VERSION) KMCP_VERSION=$(KMCP_VERSION) envsubst < helm/kagent/Chart-template.yaml > helm/kagent/Chart.yaml
 	helm dependency update helm/kagent
 	helm dependency update helm/kagent-crds
 	helm package -d $(HELM_DIST_FOLDER) helm/kagent-crds

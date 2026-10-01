@@ -1,12 +1,4 @@
-{{- if .Values.substrate.enabled }}
-################################################################################
-# WARNING: SUBSTRATE IS EXPERIMENTAL, USE AT OWN RISK                          #
-################################################################################
-Substrate is a product in early development, and as a result may be unstable due to
-schema, API, and architectural changes.
-
-Kagent uses its own fork of Substrate in order to accelerate adoption. As a result,
-the values.yaml schema is subject to change.
-
-################################################################################
+{{- if hasKey .Values "substrate" }}
+{{- fail "Substrate CRDs are owned by the separately installed AX platform; remove legacy substrate values after configuration conversion" }}
 {{- end }}
+kagent CRDs installed. Manage TaskGroups through the paired AX installation.

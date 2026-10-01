@@ -13,7 +13,7 @@ import os
 
 logger = logging.getLogger(__name__)
 
-# Environment variables injected by the substrate ActorTemplate, keyed to the file name the
+# Environment variables specified by the AX PreparedRuntime, keyed to the file name the
 # ADK loads from within the config directory.
 _ENV_TO_CONFIG_FILE = {
     "KAGENT_CONFIG_JSON": "config.json",
@@ -53,7 +53,7 @@ def _expand_config_env(value):
 
 
 def materialize_from_env(config_dir: str) -> None:
-    """Write substrate config environment variables to the paths the ADK loads from.
+    """Write runtime config environment variables to the paths the ADK loads from.
 
     No-op for any variable that is unset, so the volume-mounted Deployment path is unaffected.
     """

@@ -1,7 +1,6 @@
 package apiclient
 
 import (
-	ateclient "github.com/agent-substrate/substrate/pkg/client/clientset/versioned"
 	kagentclient "github.com/kagent-dev/kagent/go/api/clientset/versioned"
 	"istio.io/istio/pkg/cluster"
 	"istio.io/istio/pkg/kube"
@@ -13,13 +12,11 @@ import (
 type Client interface {
 	kube.Client
 	Kagent() kagentclient.Interface
-	Substrate() ateclient.Interface
 }
 
 type client struct {
 	kube.Client
-	kagent    kagentclient.Interface
-	substrate ateclient.Interface
+	kagent kagentclient.Interface
 }
 
 func New(config *rest.Config) (Client, error) {
@@ -31,19 +28,11 @@ func New(config *rest.Config) (Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	substrate, err := ateclient.NewForConfig(config)
-	if err != nil {
-		return nil, err
-	}
 
 	RegisterTypes()
-	return &client{Client: kubeClient, kagent: kagent, substrate: substrate}, nil
+	return &client{Client: kubeClient, kagent: kagent}, nil
 }
 
 func (c *client) Kagent() kagentclient.Interface {
 	return c.kagent
-}
-
-func (c *client) Substrate() ateclient.Interface {
-	return c.substrate
 }

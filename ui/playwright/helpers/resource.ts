@@ -156,8 +156,8 @@ export function optionNamed(page: Page, label?: string): Locator {
   // while the rendered text may carry more — a namespace prefix, an icon's alt.
   return page.locator(
     label === undefined
-      ? ".ant-select-item-option"
-      : `.ant-select-item-option[title="${label}"]`,
+      ? ".ant-select-item-option:visible"
+      : `.ant-select-item-option[title="${label}"]:visible`,
   );
 }
 
@@ -168,7 +168,7 @@ export async function selectOption(
   label: string,
 ): Promise<void> {
   await page.getByTestId(testId).click();
-  await optionNamed(page, label).click();
+  await (await selectOptions(page, testId, label)).click();
 }
 
 /**
@@ -177,7 +177,18 @@ export async function selectOption(
  */
 export async function selectFirstOption(page: Page, testId: string): Promise<void> {
   await page.getByTestId(testId).click();
-  await optionNamed(page).first().click();
+  await (await selectOptions(page, testId)).first().click();
+}
+
+async function selectOptions(page: Page, testId: string, label?: string): Promise<Locator> {
+  const input = page.getByTestId(testId).getByRole("combobox");
+  await expect(input).toHaveAttribute("aria-expanded", "true");
+  const listId = await input.getAttribute("aria-controls");
+  if (!listId) throw new Error(`Select ${testId} has no controlled listbox`);
+  // Scope to this Select: a previous popup can remain visible during its exit animation.
+  return page.locator(".ant-select-dropdown")
+    .filter({ has: page.locator(`[id="${listId}"]`) })
+    .locator(label === undefined ? ".ant-select-item-option" : `.ant-select-item-option[title="${label}"]`);
 }
 
 /**

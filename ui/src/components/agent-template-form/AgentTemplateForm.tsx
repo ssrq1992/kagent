@@ -155,7 +155,7 @@ export function AgentTemplateForm({
           showIcon
           data-testid="template-form-explainer"
           title="An agent template is what an agent does — not where it runs"
-          description="It carries the model, the prompt and the tools. A harness carries the runtime: the adapter, the worker pool and the image. An Agent pairs one template with one harness."
+          description="It carries the model, the prompt and the tools. A harness carries the runtime: the adapter, the TaskGroup and the image. An Agent pairs one template with one harness."
         />
       )}
 

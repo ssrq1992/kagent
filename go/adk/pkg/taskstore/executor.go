@@ -234,7 +234,7 @@ func (e *settledExecutor) Cleanup(ctx context.Context, input *a2asrv.ExecutorCon
 			}
 		}()
 	}
-	id, settleErr := e.store.sessionID()
+	id, settleErr := e.store.sessionID(finish)
 	if settleErr == nil {
 		request := &apiv1alpha1.TaskStoreServiceSettleTaskRequest{SessionId: id, TaskId: string(input.TaskID), Version: version}
 		settleErr = e.store.retry(finish, func(ctx context.Context) error {

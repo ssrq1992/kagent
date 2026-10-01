@@ -2,106 +2,73 @@ package a2agateway
 
 import (
 	"context"
-	"crypto/tls"
 	"fmt"
-	"net/http"
-	"net/url"
 
 	a2atype "github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2aclient"
 	"github.com/a2aproject/a2a-go/v2/a2aext"
 	a2agrpc "github.com/a2aproject/a2a-go/v2/a2agrpc/v1"
+	a2apb "github.com/a2aproject/a2a-go/v2/a2apb/v1"
+	ax "github.com/google/ax/pkg/apis/v1alpha1"
 	apiv1alpha1 "github.com/kagent-dev/kagent/go/api/gen/kagent/api/v1alpha1"
-	"github.com/kagent-dev/kagent/go/core/internal/substrate"
-	"github.com/kagent-dev/kagent/go/core/pkg/auth"
-	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
+	"github.com/kagent-dev/kagent/go/core/internal/axruntime"
+	"github.com/kagent-dev/kagent/go/core/internal/database"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/protobuf/proto"
 )
 
-// RuntimeDialer connects public gateway calls to the single root Actor used by
-// the current v0 Session implementation. Replacing this component with a
-// member-store-backed dialer is sufficient when runtime topology becomes
-// explicit; the gateway handler does not depend on Actor naming or Atenet.
+type runtimeBindingStore interface {
+	GetAXBinding(context.Context, string) (database.AXBinding, error)
+}
+
+// RuntimeDialer uses the shared authenticated AX connection and persisted Task UID.
+// Neither a public session field nor caller metadata can choose its destination.
 type RuntimeDialer struct {
-	target        string
-	transport     credentials.TransportCredentials
-	authenticator auth.AuthProvider
+	connection grpc.ClientConnInterface
+	store      runtimeBindingStore
 }
 
-// NewRuntimeDialer configures private A2A gRPC calls through Substrate's
-// shared Atenet router; ate-target-actor selects the Actor.
-func NewRuntimeDialer(routerURL string, authenticator auth.AuthProvider) (*RuntimeDialer, error) {
-	router, err := url.Parse(routerURL)
-	if err != nil {
-		return nil, fmt.Errorf("parse Atenet router URL %q: %w", routerURL, err)
+func NewRuntimeDialer(connection grpc.ClientConnInterface, store runtimeBindingStore) (*RuntimeDialer, error) {
+	if connection == nil || store == nil {
+		return nil, fmt.Errorf("AX connection and runtime binding store are required")
 	}
-	if router.Host == "" {
-		return nil, fmt.Errorf("atenet router URL %q must include a host", routerURL)
-	}
-	if authenticator == nil {
-		return nil, fmt.Errorf("atenet runtime authentication is not configured")
-	}
-	var transport credentials.TransportCredentials
-	switch router.Scheme {
-	case "http":
-		transport = insecure.NewCredentials()
-	case "https":
-		transport = credentials.NewTLS(&tls.Config{MinVersion: tls.VersionTLS12, ServerName: router.Hostname()})
-	default:
-		return nil, fmt.Errorf("atenet router URL %q must use http or https", routerURL)
-	}
-	return &RuntimeDialer{target: router.Host, transport: transport, authenticator: authenticator}, nil
+	return &RuntimeDialer{connection: connection, store: store}, nil
 }
-
 func (d *RuntimeDialer) Dial(ctx context.Context, session *apiv1alpha1.Session) (*a2aclient.Client, error) {
-	targetActor, err := substrate.ActorTargetFromHost(session.GetA2AAuthority())
+	if d.store == nil || d.connection == nil || session.GetId() == "" {
+		return nil, fmt.Errorf("persisted AX runtime binding is required")
+	}
+	binding, err := d.store.GetAXBinding(ctx, session.Id)
 	if err != nil {
 		return nil, err
 	}
-	return a2aclient.NewFromEndpoints(ctx, []*a2atype.AgentInterface{{
-		URL:             d.target,
-		ProtocolBinding: a2atype.TransportProtocolGRPC,
-		ProtocolVersion: a2atype.Version,
-	}},
-		a2agrpc.WithGRPCTransport(
-			grpc.WithTransportCredentials(d.transport),
-			grpc.WithStatsHandler(otelgrpc.NewClientHandler()),
-		),
-		a2aclient.WithCallInterceptors(
-			a2aext.NewClientPropagator(nil),
-			&upstreamAuthInterceptor{authenticator: d.authenticator, session: session, targetActor: targetActor},
-		),
-	)
+	if err = ax.ValidateRef(binding.Task, true); err != nil {
+		return nil, err
+	}
+	conn := &taskConnection{connection: d.connection, ref: proto.CloneOf(binding.Task)}
+	return a2aclient.NewFromEndpoints(ctx, []*a2atype.AgentInterface{{URL: "ax-task-gateway", ProtocolBinding: a2atype.TransportProtocolGRPC, ProtocolVersion: a2atype.Version}},
+		a2aclient.WithTransport(a2atype.TransportProtocolGRPC, a2aclient.TransportFactoryFn(func(context.Context, *a2atype.AgentCard, *a2atype.AgentInterface) (a2aclient.Transport, error) {
+			return a2agrpc.NewGRPCTransportFromClient(a2apb.NewA2AServiceClient(conn)), nil
+		})),
+		a2aclient.WithCallInterceptors(a2aext.NewClientPropagator(nil)))
 }
 
-// upstreamAuthInterceptor mirrors the current gateway's per-request auth
-// forwarding. ServiceParams make the resulting headers transport-neutral: the
-// A2A gRPC transport carries them as metadata to the private runtime.
-type upstreamAuthInterceptor struct {
-	a2aclient.PassthroughInterceptor
-	authenticator auth.AuthProvider
-	session       *apiv1alpha1.Session
-	targetActor   string
+type taskConnection struct {
+	connection grpc.ClientConnInterface
+	ref        *ax.ResourceRef
 }
 
-func (u *upstreamAuthInterceptor) Before(ctx context.Context, req *a2aclient.Request) (context.Context, any, error) {
-	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+req.BaseURL, nil)
+func (c *taskConnection) Invoke(ctx context.Context, method string, args, reply any, opts ...grpc.CallOption) error {
+	ctx, err := axruntime.TaskContext(ctx, c.ref)
 	if err != nil {
-		return ctx, nil, err
+		return err
 	}
-	if session, ok := auth.AuthSessionFrom(ctx); ok {
-		principal := auth.Principal{Agent: auth.Agent{ID: u.session.GetId()}}
-		if err := u.authenticator.UpstreamAuth(httpRequest, session, principal); err != nil {
-			return ctx, nil, err
-		}
+	return c.connection.Invoke(ctx, method, args, reply, opts...)
+}
+func (c *taskConnection) NewStream(ctx context.Context, desc *grpc.StreamDesc, method string, opts ...grpc.CallOption) (grpc.ClientStream, error) {
+	ctx, err := axruntime.TaskContext(ctx, c.ref)
+	if err != nil {
+		return nil, err
 	}
-	for key, values := range httpRequest.Header {
-		for _, value := range values {
-			req.ServiceParams.Append(key, value)
-		}
-	}
-	req.ServiceParams["ate-target-actor"] = []string{u.targetActor}
-	return ctx, nil, nil
+	return c.connection.NewStream(ctx, desc, method, opts...)
 }

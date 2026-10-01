@@ -23,7 +23,7 @@
 //   - MODEL_NAME: the OpenAI model to use (default "gpt-4o-mini").
 //
 // Deploy through a BYO Harness so the runtime receives its API endpoint and
-// projected actor identity. The app requires the central TaskStore for A2A work.
+// AX runtime credentials. The app requires the central TaskStore for A2A work.
 package main
 
 import (

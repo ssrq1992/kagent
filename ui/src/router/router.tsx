@@ -38,7 +38,6 @@ import { PromptsPage } from "@/pages/PromptsPage";
 import { PromptNewPage } from "@/pages/PromptNewPage";
 import { PromptDetailPage } from "@/pages/PromptDetailPage";
 import { PromptEditPage } from "@/pages/PromptEditPage";
-import { SubstratePage } from "@/pages/SubstratePage";
 import { AppDetailPage } from "@/pages/AppDetailPage";
 import { SharedAgentPage } from "@/pages/SharedAgentPage";
 import { LoginPage } from "@/pages/LoginPage";
@@ -96,7 +95,6 @@ const coreLayoutRoutes: (RouteObject & { key: string })[] = [
      order here is only for reading. */
   { key: "scheduledRun", path: paths.scheduledRun, element: <ScheduledRunPage /> },
   { key: "scheduledRunEdit", path: paths.scheduledRunEdit, element: <ScheduledRunEditPage /> },
-  { key: "substrate", path: paths.substrate, element: <SubstratePage /> },
   { key: "appDetail", path: paths.appDetail, element: <AppDetailPage /> },
   { key: "sharedAgent", path: paths.sharedAgent, element: <SharedAgentPage /> },
 ];

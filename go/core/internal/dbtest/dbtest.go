@@ -4,6 +4,10 @@ package dbtest
 import (
 	"context"
 	"fmt"
+
+	"github.com/kagent-dev/kagent/go/core/internal/pgtest"
+	"os"
+
 	"testing"
 	"time"
 
@@ -16,6 +20,9 @@ import (
 // Start starts a pgvector Postgres container and returns the connection string
 // and a cleanup function. Callers are responsible for calling cleanup when done.
 func Start(ctx context.Context) (connStr string, cleanup func(), err error) {
+	if dsn := os.Getenv("KAGENT_TEST_POSTGRES_DSN"); dsn != "" {
+		return pgtest.Start(ctx, dsn)
+	}
 	pgContainer, err := tcpostgres.Run(ctx,
 		"pgvector/pgvector:pg18-trixie",
 		tcpostgres.WithDatabase("kagent_test"),

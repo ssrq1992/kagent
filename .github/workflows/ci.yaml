@@ -16,6 +16,10 @@ on:
   merge_group:
   workflow_dispatch:
     inputs:
+      run_cluster_acceptance:
+        description: Run release-gate acceptance on the dedicated preinstalled AX test cluster
+        type: boolean
+        default: false
       e2e_parallel:
         description: Concurrent E2E scenarios (compare on the same revision)
         type: choice
@@ -50,196 +54,29 @@ jobs:
           echo "key=${BRANCH_KEY}" >> $GITHUB_OUTPUT
           echo "::notice title=Cache Key::Branch: ${BRANCH_KEY}"
   test-e2e:
-    env:
-      VERSION: v0.0.1-test
-      SUBSTRATE_VERSION: 0.3.0-alpha1
-      # Keep the four-vCPU runner bounded; manual runs can compare higher concurrency.
-      E2E_PARALLEL: ${{ inputs.e2e_parallel || '4' }}
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 40
+    name: AX cluster acceptance (release gate)
+    if: github.event_name == 'workflow_dispatch' && inputs.run_cluster_acceptance
+    runs-on: [self-hosted, ax-runtime]
+    timeout-minutes: 45
+    environment: ax-cluster-acceptance
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v6
-      - name: Initialize Environment
-        uses: ./.github/actions/initialize-environment
-      - name: Set up Go
-        uses: actions/setup-go@v7
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/checkout-ax
+        with:
+          repository: ${{ vars.AX_REPOSITORY }}
+          ref: ${{ vars.AX_REF }}
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go/go.mod
-          cache: false
-      - name: Cache E2E Go dependencies and build
-        uses: actions/cache@v6
-        with:
-          path: |
-            ~/go/pkg/mod
-            ~/.cache/go-build
-          key: e2e-go-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('go/go.mod', 'go/go.sum') }}
-          restore-keys: |
-            e2e-go-${{ runner.os }}-${{ runner.arch }}-
-      - name: Allow unprivileged user namespaces
-        # Ubuntu 24.04 (ubuntu-latest) enables AppArmor-based restrictions on
-        # unprivileged user namespaces by default, which causes bubblewrap
-        # to fail with EPERM on unshare(CLONE_NEWUSER)
-        # See https://github.com/openai/codex/issues/14919
-        run: |
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
-      - name: Setup Blacksmith Builder
-        uses: useblacksmith/setup-docker-builder@v2
-        with:
-          cache-key: kagent-e2e
-          platforms: linux/amd64
-          nofallback: true
-
-      - name: Set up Helm
-        uses: azure/setup-helm@v5.0.1
-        with:
-          version: v3.18.0
-
-      - name: Install Kind
-        id: kind
-        uses: helm/kind-action@06c1ae10762d3b9c1644e7fe69596ae519e015a2
-        with:
-          install_only: true
-
-      - name: Create Kind cluster
-        run: |
-          make create-kind-cluster
-
-      - name: Install Agent Substrate
-        run: |
-          curl -fsSL -o kubectl-ate "https://github.com/kagent-dev/substrate/releases/download/v${SUBSTRATE_VERSION}/kubectl-ate-linux-amd64"
-          chmod +x kubectl-ate
-          helm upgrade --install substrate-crds oci://ghcr.io/kagent-dev/substrate/helm/substrate-crds --version "${SUBSTRATE_VERSION}" --namespace ate-system --create-namespace
-          helm upgrade --install substrate oci://ghcr.io/kagent-dev/substrate/helm/substrate --version "${SUBSTRATE_VERSION}" --namespace ate-system \
-            --set-string 'atelet.extraArgs[0]=--localhost-registry-replacement=kind-registry:5000' \
-            --set-string 'ateApi.extraArgs[0]=--template-resync-interval=250ms' \
-            --set 'credentialProvider.namespacePolicies[0].atespace=kagent' \
-            --set 'credentialProvider.namespacePolicies[0].allowedNamespaces[0]=kagent'
-          ./kubectl-ate --context kind-kagent admin make-ca-pool --ca-id=1 --name=service-dns-ca-pool --secret-namespace=podcertificate-controller-system
-          ./kubectl-ate --context kind-kagent admin make-ca-pool --ca-id=1 --name=pod-identity-ca-pool --secret-namespace=podcertificate-controller-system
-          ./kubectl-ate --context kind-kagent admin make-jwt-pool --key-id=1 --name=actor-id-jwt-pool --secret-namespace=ate-system
-          ./kubectl-ate --context kind-kagent admin make-ca-pool --ca-id=1 --name=actor-id-ca-pool --secret-namespace=ate-system
-          ./kubectl-ate --context kind-kagent admin make-ca-pool --ca-id=1 --name=egress-mitm-ca-pool --secret-namespace=ate-system --key-type=ECDSAP256
-          actor_id_ca_root="$(kubectl get secret actor-id-ca-pool -n ate-system -o jsonpath='{.data.pool}' | base64 --decode | jq -r '.CAs[0].RootCertificateDER' | base64 --decode | openssl x509 -inform der -outform pem)"
-          kubectl create secret generic actor-id-ca-certs -n ate-system --from-literal=ca.crt="${actor_id_ca_root}"
-          kubectl create configmap ate-api-authentication -n ate-system --from-literal=authentication.yaml=$'actorIdentityJWTProvider: kubernetes\njwtProviders:\n- name: kubernetes\n  issuer: https://kubernetes.default.svc\n  audiences: [api.ate-system.svc]\n  certificateAuthorityFile: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt\n  discoveryTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token\n'
-          helm upgrade substrate oci://ghcr.io/kagent-dev/substrate/helm/substrate --version "${SUBSTRATE_VERSION}" --namespace ate-system --reuse-values --wait --timeout 5m
-
-      - name: Install Kagent
-        id: install-kagent
+      - name: Run paired installation acceptance
         env:
-          OPENAI_API_KEY: fake
-          KMCP_ENABLED: "false"
-          KAGENT_HELM_EXTRA_ARGS: >-
-            --cleanup-on-fail=false
-            --set ui.replicas=0
-            --set kagent-tools.enabled=false
-            --set grafana-mcp.enabled=false
-            --set controller.substrate.enabled=true
-            --set controller.substrate.ateApiEndpoint=dns:///api.ate-system.svc:443
-            --set controller.substrate.atenetRouterURL=http://atenet-router.ate-system.svc:80
-            --set substrateWorkerPool.create=true
-            --set substrateWorkerPool.replicas=4
-            --set-string substrateWorkerPool.workerImage=ghcr.io/kagent-dev/substrate/ateom-gvisor:v${{ env.SUBSTRATE_VERSION }}
-            --set otel.traces.enabled=true
-            --set-string otel.exporter.otlp.endpoint=http://172.17.0.1:14317
-        run: |
-          # Reuse Blacksmith's persistent layers and Go cache mounts. The Makefile
-          # otherwise selects a fresh local builder, discarding that cache.
-          BUILDX_BUILDER_NAME=$(docker buildx inspect | awk '$1 == "Name:" { print $2; exit }')
-          test -n "$BUILDX_BUILDER_NAME"
-          export BUILDX_BUILDER_NAME
-          make buildx-create
-          printf '%s\n' controller golang-adk claude-harness codex-harness byo-a2a sandbox-guest | xargs -P4 -n1 bash -c '
-            image="$1"
-            DOCKER_BUILD_ARGS="--platform=linux/amd64 --push" \
-              make GIT_COMMIT=e2e BUILD_DATE=1970-01-01 "build-${image}"
-          ' _
-          # Resolve the guest on the runner: localhost:5001 is not reachable
-          # from the controller pod. Substrate rewrites registry pulls on workers.
-          GUEST_DIGEST=$(docker buildx imagetools inspect "localhost:5001/kagent-dev/kagent/sandbox-guest:${VERSION}" | awk '$1 == "Digest:" { print $2 }')
-          test -n "$GUEST_DIGEST"
-          export KAGENT_HELM_EXTRA_ARGS="${KAGENT_HELM_EXTRA_ARGS} --set-string controller.sandbox.guestImage.digest=${GUEST_DIGEST}"
-          make helm-install-provider
-          kubectl rollout status deployment/kagent-controller -n kagent --timeout=120s
-          kubectl wait --for=condition=Ready pod -l app.kubernetes.io/component=controller -n kagent --timeout=120s
-
-      - name: Run e2e tests
-        if: success()
-        working-directory: go
-        shell: bash
-        run: |
-          # Read all output so Docker does not get a broken pipe under pipefail.
-          RUNTIME_DIGEST=$(docker buildx imagetools inspect "localhost:5001/kagent-dev/kagent/golang-adk:${VERSION}" | awk '$1 == "Digest:" { print $2 }')
-          test -n "$RUNTIME_DIGEST"
-          export KAGENT_E2E_RUNTIME_IMAGE="localhost:5001/kagent-dev/kagent/golang-adk@${RUNTIME_DIGEST}"
-          BYO_DIGEST=$(docker buildx imagetools inspect "localhost:5001/kagent-dev/kagent/byo-a2a:${VERSION}" | awk '$1 == "Digest:" { print $2 }')
-          test -n "$BYO_DIGEST"
-          export KAGENT_E2E_BYO_IMAGE="localhost:5001/kagent-dev/kagent/byo-a2a@${BYO_DIGEST}"
-          CLAUDE_DIGEST=$(docker buildx imagetools inspect "localhost:5001/kagent-dev/kagent/claude-harness:${VERSION}" | awk '$1 == "Digest:" { print $2 }')
-          test -n "$CLAUDE_DIGEST"
-          export KAGENT_E2E_CLAUDE_IMAGE="localhost:5001/kagent-dev/kagent/claude-harness@${CLAUDE_DIGEST}"
-          CODEX_DIGEST=$(docker buildx imagetools inspect "localhost:5001/kagent-dev/kagent/codex-harness:${VERSION}" | awk '$1 == "Digest:" { print $2 }')
-          test -n "$CODEX_DIGEST"
-          export KAGENT_E2E_CODEX_IMAGE="localhost:5001/kagent-dev/kagent/codex-harness@${CODEX_DIGEST}"
-          envsubst < core/test/e2e/manifests/lifecycle.yaml.tmpl | kubectl apply -f -
-          for _ in $(seq 1 60); do
-            READY=$(kubectl get agent smoke -n kagent -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}')
-            if [ "$READY" = True ]; then break; fi
-            sleep 5
-          done
-          test "$READY" = True
-          export KAGENT_API_URL="http://$(kubectl get svc -n kagent kagent-controller -o jsonpath='{.status.loadBalancer.ingress[0].ip}'):8083"
-          export KAGENT_GATEWAY_URL="$KAGENT_API_URL"
-          echo "KAGENT_API_URL: $KAGENT_API_URL"
-          make core/bin/kagent-local
-          export KAGENT_E2E_CLI="$PWD/core/bin/kagent-local"
-          envsubst < core/test/e2e/manifests/tracing.yaml.tmpl | kubectl apply -f -
-          export KAGENT_E2E_API_URL="$KAGENT_API_URL"
-          export KAGENT_E2E_LOCAL_HOST=172.17.0.1
-          # TestMain keeps the receiver alive for every runtime's response flush.
-          export KAGENT_E2E_OTLP_LISTEN_ADDRESS=:14317
-          # Concurrent actors can push an earlier failure out of the final log tail.
-          mkdir -p "$RUNNER_TEMP/e2e-logs"
-          kubectl logs -n kagent -l ate.dev/worker-pool --all-containers --prefix --timestamps --tail=-1 --follow --max-log-requests=20 > "$RUNNER_TEMP/e2e-logs/workers.log" 2>&1 &
-          worker_logs_pid=$!
-          kubectl logs -n ate-system -l app --all-containers --prefix --timestamps --tail=-1 --follow --max-log-requests=20 > "$RUNNER_TEMP/e2e-logs/substrate.log" 2>&1 &
-          substrate_logs_pid=$!
-          trap 'kill "$worker_logs_pid" "$substrate_logs_pid" 2>/dev/null || true; wait "$worker_logs_pid" "$substrate_logs_pid" 2>/dev/null || true' EXIT
-          go test -v github.com/kagent-dev/kagent/go/core/test/e2e -shuffle=on -parallel "$E2E_PARALLEL" -count=1 -timeout=30m 2>&1 | tee "$RUNNER_TEMP/e2e-logs/tests.log"
-
-      - name: Collect E2E controller logs
+          E2E_PARALLEL: ${{ inputs.e2e_parallel || '4' }}
+        run: scripts/verify-ax-cluster.sh
+      - uses: actions/upload-artifact@v7
         if: always()
-        run: |
-          mkdir -p "$RUNNER_TEMP/e2e-logs"
-          kubectl logs -n kagent deployment/kagent-controller --timestamps > "$RUNNER_TEMP/e2e-logs/controller.log" 2>&1 || true
-
-      - name: Upload E2E logs
-        if: always()
-        uses: actions/upload-artifact@v7
         with:
-          name: e2e-logs
-          path: ${{ runner.temp }}/e2e-logs
-          retention-days: 7
-
-      - name: fail print info
-        if: failure()
-        run: |
-          echo "::error::Failed to run e2e tests"
-          echo "::error::Kubectl get pods -n kagent"
-          kubectl describe pods -n kagent
-          echo "::error::Kubectl get events -n kagent"
-          kubectl get events -n kagent
-          echo "::error::Kubectl get Harnesses and AgentTemplates -n kagent"
-          kubectl get harnesses,agenttemplates -n kagent
-          echo "::error::Kubectl logs -n kagent deployment/kagent-controller"
-          kubectl logs -n kagent deployment/kagent-controller
-          kubectl get pods,workerpools -A
-          echo "::error::Substrate logs"
-          kubectl logs -n ate-system -l app --all-containers --prefix --tail=200 || true
-          kubectl logs -n ate-system -l app --all-containers --prefix --previous --tail=200 || true
-          kubectl logs -n kagent -l ate.dev/worker-pool --all-containers --prefix --tail=200 || true
-          kubectl logs -n kagent -l ate.dev/worker-pool --all-containers --prefix --previous --tail=200 || true
+          name: ax-cluster-acceptance
+          path: artifacts/ax-cluster-acceptance
 
   proto-check:
     name: Protobuf Contract Check
@@ -249,6 +86,10 @@ jobs:
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
+      - uses: ./.github/actions/checkout-ax
+        with:
+          repository: ${{ vars.AX_REPOSITORY }}
+          ref: ${{ vars.AX_REF }}
       - name: Set up Go
         uses: actions/setup-go@v7
         with:
@@ -266,6 +107,10 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
+      - uses: ./.github/actions/checkout-ax
+        with:
+          repository: ${{ vars.AX_REPOSITORY }}
+          ref: ${{ vars.AX_REF }}
       - name: Set up Go
         uses: actions/setup-go@v7
         with:
@@ -296,6 +141,10 @@ jobs:
           # upgrade-from release, and so the local action below is on disk.
           fetch-depth: 0
           fetch-tags: true
+      - uses: ./.github/actions/checkout-ax
+        with:
+          repository: ${{ vars.AX_REPOSITORY }}
+          ref: ${{ vars.AX_REF }}
       - name: Prepare upgrade test environment
         id: prep
         uses: ./.github/actions/upgrade-test-setup
@@ -344,6 +193,10 @@ jobs:
           # upgrade-from release, and so the local action below is on disk.
           fetch-depth: 0
           fetch-tags: true
+      - uses: ./.github/actions/checkout-ax
+        with:
+          repository: ${{ vars.AX_REPOSITORY }}
+          ref: ${{ vars.AX_REF }}
       - name: Prepare upgrade test environment
         id: prep
         uses: ./.github/actions/upgrade-test-setup
@@ -376,6 +229,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
 
+      - uses: ./.github/actions/checkout-ax
+        with:
+          repository: ${{ vars.AX_REPOSITORY }}
+          ref: ${{ vars.AX_REF }}
       - name: Set up Go
         uses: actions/setup-go@v7
         with:
@@ -403,6 +260,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
 
+      - uses: ./.github/actions/checkout-ax
+        with:
+          repository: ${{ vars.AX_REPOSITORY }}
+          ref: ${{ vars.AX_REF }}
       - name: Set up Helm
         uses: azure/setup-helm@v5.0.1
         with:
@@ -430,6 +291,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
 
+      - uses: ./.github/actions/checkout-ax
+        with:
+          repository: ${{ vars.AX_REPOSITORY }}
+          ref: ${{ vars.AX_REF }}
       - name: Setup Node.js
         uses: actions/setup-node@v7
         with:
@@ -498,6 +363,10 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
+      - uses: ./.github/actions/checkout-ax
+        with:
+          repository: ${{ vars.AX_REPOSITORY }}
+          ref: ${{ vars.AX_REF }}
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v4
         with:
@@ -528,6 +397,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
 
+      - uses: ./.github/actions/checkout-ax
+        with:
+          repository: ${{ vars.AX_REPOSITORY }}
+          ref: ${{ vars.AX_REF }}
       - name: Set up Go
         uses: actions/setup-go@v7
         with:
@@ -549,6 +422,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
 
+      - uses: ./.github/actions/checkout-ax
+        with:
+          repository: ${{ vars.AX_REPOSITORY }}
+          ref: ${{ vars.AX_REF }}
       - name: Install uv
         uses: astral-sh/setup-uv@v7
 
@@ -573,6 +450,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
 
+      - uses: ./.github/actions/checkout-ax
+        with:
+          repository: ${{ vars.AX_REPOSITORY }}
+          ref: ${{ vars.AX_REF }}
       - name: Install uv
         uses: astral-sh/setup-uv@v7
 
@@ -605,6 +486,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
 
+      - uses: ./.github/actions/checkout-ax
+        with:
+          repository: ${{ vars.AX_REPOSITORY }}
+          ref: ${{ vars.AX_REF }}
       - name: Set up Go
         uses: actions/setup-go@v7
         with:

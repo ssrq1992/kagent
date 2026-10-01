@@ -5,37 +5,26 @@ import (
 	"testing"
 
 	a2apb "github.com/a2aproject/a2a-go/v2/a2apb/v1"
-	atev1alpha1 "github.com/agent-substrate/substrate/pkg/api/v1alpha1"
+	ax "github.com/google/ax/pkg/apis/v1alpha1"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 )
 
-func TestRevisionDigestIncludesSandboxClass(t *testing.T) {
-	revision := &Revision{Namespace: "agents", AgentName: "helper"}
+func TestRevisionDigestIncludesTaskGroupUID(t *testing.T) {
+	ref := &ax.ResourceRef{Atespace: "agents", Name: "group", Uid: "uid-one"}
+	revision := &Revision{Namespace: "agents", AgentName: "helper", GroupRef: ref}
 	original, err := revision.Digest()
 	require.NoError(t, err)
-	require.NotEqual(t, "563beefdd1b191baae375aa92e70bcab812a3c4fd2a189cdf74668f1ad45456d", original.String(),
-		"the default class must participate in the digest instead of preserving the legacy digest")
-
-	revision.SandboxClass = atev1alpha1.SandboxClassGvisor
-	gvisor, err := revision.Digest()
-	require.NoError(t, err)
-	require.Equal(t, original, gvisor, "empty and explicit gVisor select the same runtime")
-	require.Equal(t, atev1alpha1.SandboxClassGvisor, revision.SandboxClass, "hashing must not mutate the revision")
-
-	revision.SandboxClass = atev1alpha1.SandboxClassMicroVM
-	microvm, err := revision.Digest()
-	require.NoError(t, err)
-	require.NotEqual(t, gvisor, microvm, "changing sandbox class must create a new immutable revision")
 	repeated, err := revision.Digest()
 	require.NoError(t, err)
-	require.Equal(t, microvm, repeated)
-
-	revision.SandboxClass = "unsupported"
-	invalid, err := revision.Digest()
-	require.EqualError(t, err, `unsupported sandbox class "unsupported"`)
-	require.True(t, invalid.IsZero())
+	require.Equal(t, original, repeated)
+	revision.GroupRef = proto.CloneOf(ref)
+	revision.GroupRef.Uid = "uid-two"
+	changed, err := revision.Digest()
+	require.NoError(t, err)
+	require.NotEqual(t, original, changed)
+	require.Equal(t, "uid-one", ref.Uid)
 }
 
 func TestRevisionDigestIncludesProvenance(t *testing.T) {

@@ -4,25 +4,24 @@ import (
 	"context"
 	"io"
 	"net/http"
-	"net/http/httptest"
 	"net/url"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/agent-substrate/env/guest"
-	guestpb "github.com/agent-substrate/env/proto/ateenv/v1alpha"
-	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
+	ax "github.com/google/ax/pkg/apis/v1alpha1"
+	guestpb "github.com/google/ax/pkg/apis/v1alpha1"
 	"github.com/jackc/pgx/v5/pgxpool"
 	apiv1alpha1 "github.com/kagent-dev/kagent/go/api/gen/kagent/api/v1alpha1"
 	"github.com/kagent-dev/kagent/go/api/v1alpha3"
 	"github.com/kagent-dev/kagent/go/core/internal/database"
 	"github.com/kagent-dev/kagent/go/core/internal/dbtest"
 	sandboxservice "github.com/kagent-dev/kagent/go/core/internal/service/sandbox"
-	"github.com/kagent-dev/kagent/go/core/internal/substrate"
 	"github.com/kagent-dev/kagent/go/core/pkg/auth"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
@@ -52,61 +51,13 @@ func (testAuth) UpstreamAuth(request *http.Request, _ auth.Session, principal au
 	return nil
 }
 
+// Wrap the real AX client only to record RPCs and simulate lost responses.
 type testActors struct {
-	substrate.LifecycleClient
+	ax.AXClient
 	mu          sync.Mutex
-	actor       *ateapipb.Actor
 	calls       []string
-	readErr     error
 	mutationErr error
-}
-
-func (a *testActors) GetActor(context.Context, string, string) (*ateapipb.Actor, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.readErr != nil {
-		return nil, a.readErr
-	}
-	if a.actor == nil {
-		return nil, status.Error(codes.NotFound, "missing")
-	}
-	return proto.CloneOf(a.actor), nil
-}
-func (a *testActors) CreateActor(_ context.Context, space, name, templateSpace, templateName string) (*ateapipb.Actor, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.calls = append(a.calls, "create")
-	a.actor = &ateapipb.Actor{Metadata: &ateapipb.ResourceMetadata{Atespace: space, Name: name, Uid: "uid"},
-		ActorTemplate: &ateapipb.ObjectRef{Atespace: templateSpace, Name: templateName},
-		Status:        &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_SUSPENDED}}
-	return proto.CloneOf(a.actor), a.mutationErr
-}
-func (a *testActors) EnsureActorEgressPolicy(context.Context, string, string, *ateapipb.EgressPolicy) error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.calls = append(a.calls, "policy")
-	return a.mutationErr
-}
-func (a *testActors) ResumeActor(context.Context, string, string) (*ateapipb.Actor, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.calls = append(a.calls, "resume")
-	a.actor.Status.State = ateapipb.ActorState_ACTOR_STATE_RUNNING
-	return proto.CloneOf(a.actor), a.mutationErr
-}
-func (a *testActors) SuspendActor(context.Context, string, string) (*ateapipb.Actor, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.calls = append(a.calls, "suspend")
-	a.actor.Status.State = ateapipb.ActorState_ACTOR_STATE_SUSPENDED
-	return proto.CloneOf(a.actor), a.mutationErr
-}
-func (a *testActors) DeleteActor(context.Context, string, string) error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.calls = append(a.calls, "delete")
-	a.actor = nil
-	return a.mutationErr
+	task        *ax.ResourceRef
 }
 
 func (a *testActors) observedCalls() []string {
@@ -114,8 +65,49 @@ func (a *testActors) observedCalls() []string {
 	defer a.mu.Unlock()
 	return slices.Clone(a.calls)
 }
+func (a *testActors) CreateTask(ctx context.Context, req *ax.CreateTaskRequest, opts ...grpc.CallOption) (*ax.Task, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.calls = append(a.calls, "create")
+	task, err := a.AXClient.CreateTask(ctx, req, opts...)
+	if err != nil {
+		return nil, err
+	}
+	a.task = ax.Ref(task.Metadata)
+	return task, a.mutationErr
+}
+func (a *testActors) ResumeTask(ctx context.Context, req *ax.ResumeTaskRequest, opts ...grpc.CallOption) (*ax.Task, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.calls = append(a.calls, "resume")
+	task, err := a.AXClient.ResumeTask(ctx, req, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return task, a.mutationErr
+}
+func (a *testActors) SuspendTask(ctx context.Context, req *ax.SuspendTaskRequest, opts ...grpc.CallOption) (*ax.Task, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.calls = append(a.calls, "suspend")
+	task, err := a.AXClient.SuspendTask(ctx, req, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return task, a.mutationErr
+}
+func (a *testActors) DeleteTask(ctx context.Context, req *ax.DeleteTaskRequest, opts ...grpc.CallOption) (*ax.DeleteTaskResponse, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.calls = append(a.calls, "delete")
+	result, err := a.AXClient.DeleteTask(ctx, req, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return result, a.mutationErr
+}
 
-func guestFixture(t *testing.T) (*sandboxservice.Service, context.Context, *testActors, func() http.Header) {
+func guestFixture(t *testing.T) (*sandboxservice.Service, context.Context, *testActors) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.WithoutCancel(t.Context()))
 	t.Cleanup(cancel)
@@ -127,9 +119,15 @@ func guestFixture(t *testing.T) (*sandboxservice.Service, context.Context, *test
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
 	store := database.NewClient(pool)
+	axClient := startAXFixture(t)
+	group, err := axClient.CreateTaskGroup(ctx, &ax.CreateTaskGroupRequest{RequestId: "group", Group: &ax.TaskGroup{Metadata: &ax.ObjectMeta{Atespace: "team-a", Name: "group"}, Spec: &ax.TaskGroupSpec{Replicas: new(int32(1)), SandboxClass: "gvisor", SnapshotLocation: "s3://test/snapshots"}}})
+	require.NoError(t, err)
+	prepared, err := axClient.PrepareRuntime(ctx, &ax.PrepareRuntimeRequest{Metadata: &ax.ObjectMeta{Atespace: "team-a", Name: "revision"}, RequestId: "runtime", Spec: &ax.PreparedRuntimeSpec{Kind: "Sandbox", GroupRef: ax.Ref(group.Metadata), Image: "tools@sha256:" + strings.Repeat("a", 64)}})
+	require.NoError(t, err)
+
 	require.NoError(t, store.UpsertSandboxTemplateDefinition(ctx, database.SandboxTemplateDefinition{Namespace: "team-a", SandboxTemplateName: "scratch", SandboxTemplateUID: "template-uid", DesiredRevision: "revision"}))
 	require.NoError(t, store.RecordSandboxRevision(ctx, database.SandboxRevision{
-		RuntimeArtifact:     database.RuntimeArtifact{Revision: "revision", Kind: "sandbox", Namespace: "team-a", ActorTemplateAtespace: "team-a", ActorTemplateName: "revision", ActorTemplateUID: "revision-uid"},
+		RuntimeArtifact:     database.RuntimeArtifact{Revision: "revision", Kind: "sandbox", Namespace: "team-a", PreparedRuntimeAtespace: "team-a", PreparedRuntimeName: "revision", PreparedRuntimeUID: prepared.Metadata.Uid},
 		SandboxTemplateName: "scratch", SandboxTemplateUID: "template-uid", SourceSnapshot: []byte("{}"),
 	}, true))
 	scheme := runtime.NewScheme()
@@ -137,35 +135,12 @@ func guestFixture(t *testing.T) (*sandboxservice.Service, context.Context, *test
 	kube := fake.NewClientBuilder().WithScheme(scheme).WithObjects(&v1alpha3.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "scratch", UID: "template-uid"},
 	}).Build()
-	server, closeGuest, err := guest.NewServer(guest.Config{Workspace: t.TempDir(), LogDir: t.TempDir(), EnableProcess: true, EnableFileSystem: true})
-	require.NoError(t, err)
-	t.Cleanup(closeGuest)
-	t.Cleanup(server.Stop)
-	var mu sync.Mutex
-	var lastHeaders http.Header
-	router := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-		mu.Lock()
-		lastHeaders = request.Header.Clone()
-		mu.Unlock()
-		server.ServeHTTP(w, request)
-	}))
-	protocols := new(http.Protocols)
-	protocols.SetUnencryptedHTTP2(true)
-	router.Config.Protocols = protocols
-	router.Start()
-	t.Cleanup(router.Close)
-	guests, err := sandboxservice.NewGuestDialer(router.URL, testAuth{})
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, guests.Close()) })
-	actors := &testActors{}
-	service, err := sandboxservice.NewService(sandboxservice.Config{Store: store, Kube: kube, Authorizer: auth.NoopAuthorizer{}, Actors: actors, Guests: guests,
+	guests := sandboxservice.NewGuestDialer(axClient.Connection())
+	actors := &testActors{AXClient: axClient}
+	service, err := sandboxservice.NewService(sandboxservice.Config{Store: store, Kube: kube, Authorizer: auth.NoopAuthorizer{}, Runtime: actors, Guests: guests,
 		DefaultTTL: time.Hour, MaxTTL: 24 * time.Hour})
 	require.NoError(t, err)
-	return service, auth.AuthSessionTo(t.Context(), testSession("alice")), actors, func() http.Header {
-		mu.Lock()
-		defer mu.Unlock()
-		return lastHeaders.Clone()
-	}
+	return service, auth.AuthSessionTo(t.Context(), testSession("alice")), actors
 }
 
 func createRequest() *apiv1alpha1.CreateSandboxRequest {
@@ -173,16 +148,16 @@ func createRequest() *apiv1alpha1.CreateSandboxRequest {
 }
 
 func TestSandboxGuestLifecycle(t *testing.T) {
-	service, ctx, actors, headers := guestFixture(t)
+	service, ctx, actors := guestFixture(t)
 	instance, err := service.Create(ctx, createRequest())
 	require.NoError(t, err)
 	require.Equal(t, apiv1alpha1.RuntimeState_RUNTIME_STATE_READY, instance.State)
-	require.Equal(t, []string{"create", "policy", "resume"}, actors.observedCalls())
+	require.Equal(t, []string{"create", "resume"}, actors.observedCalls())
 	retry, err := service.Create(ctx, createRequest())
 	require.NoError(t, err)
 	require.Equal(t, instance.Id, retry.Id)
 	require.True(t, proto.Equal(instance.ExpiresAt, retry.ExpiresAt))
-	require.Len(t, actors.observedCalls(), 3)
+	require.Len(t, actors.observedCalls(), 2)
 
 	mallory := auth.AuthSessionTo(t.Context(), testSession("mallory"))
 	_, err = service.Get(mallory, instance.Id)
@@ -209,9 +184,6 @@ func TestSandboxGuestLifecycle(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.EqualValues(t, 3, written.BytesWritten)
-	require.Equal(t, "team-a/"+substrate.ActorName(instance.Id), headers().Get("ate-target-actor"))
-	require.Equal(t, "alice", headers().Get("x-user-id"))
-	require.Empty(t, headers().Get("authorization"))
 	var data []byte
 	require.NoError(t, service.ReadFile(ctx, instance.Id, &guestpb.ReadFileRequest{Path: "input.bin"}, func(chunk *guestpb.FileChunk) error { data = append(data, chunk.Data...); return nil }))
 	require.Equal(t, []byte{0, 128, 255}, data)
@@ -298,7 +270,7 @@ func TestSandboxGuestLifecycle(t *testing.T) {
 	instance, err = service.Delete(ctx, instance.Id)
 	require.NoError(t, err)
 	require.Equal(t, apiv1alpha1.RuntimeState_RUNTIME_STATE_DELETED, instance.State)
-	deletedActor, err := actors.GetActor(ctx, "", "")
+	deletedActor, err := actors.GetTask(ctx, &ax.GetTaskRequest{Atespace: actors.task.Atespace, Name: actors.task.Name})
 	require.Nil(t, deletedActor)
 	require.Equal(t, codes.NotFound, status.Code(err))
 	_, err = service.Create(ctx, createRequest())

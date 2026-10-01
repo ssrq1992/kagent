@@ -3,12 +3,13 @@ package session
 import (
 	"context"
 	"crypto/sha256"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
-	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
+	ax "github.com/google/ax/pkg/apis/v1alpha1"
 	"github.com/google/uuid"
 	apiv1alpha1 "github.com/kagent-dev/kagent/go/api/gen/kagent/api/v1alpha1"
 	"github.com/kagent-dev/kagent/go/core/internal/database"
@@ -29,9 +30,12 @@ func TestIdleLifecycleDoesNotOwnTaskPublication(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			store, session := lifecycleFixture(t)
-			base := &lifecycleTestActors{actors: map[string]*ateapipb.Actor{}}
-			session, err := NewActorWorkflow(store, base).Create(t.Context(), session)
+			base := &lifecycleTestActors{actors: map[string]*ax.Task{}}
+			session, err := NewTaskWorkflow(store, base).Create(t.Context(), session)
 			require.NoError(t, err)
+			for _, task := range base.actors {
+				task.Status.RuntimeStatus.Phase = "Running"
+			}
 			message := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("hello"))
 			message.ContextID = session.ContextId
 			task := a2a.NewSubmittedTask(message, message)
@@ -42,8 +46,9 @@ func TestIdleLifecycleDoesNotOwnTaskPublication(t *testing.T) {
 			require.NoError(t, store.SettleSessionTask(t.Context(), session.Id, string(task.ID), version))
 
 			entered, release := make(chan struct{}), make(chan struct{})
+			var readOnce sync.Once
 			actors := &retryTestActors{lifecycleTestActors: base, beforeRead: func(ctx context.Context) {
-				close(entered)
+				readOnce.Do(func() { close(entered) })
 				select {
 				case <-release:
 				case <-ctx.Done():
@@ -57,7 +62,7 @@ func TestIdleLifecycleDoesNotOwnTaskPublication(t *testing.T) {
 			ctx, cancel := context.WithCancel(t.Context())
 			done := make(chan error, 1)
 			writes := &quiescenceRetryStore{lifecycleTestStore: store, failures: test.finishFailures}
-			go func() { done <- NewActorWorkflow(writes, actors).Start(ctx) }()
+			go func() { done <- NewTaskWorkflow(writes, actors).Start(ctx) }()
 			t.Cleanup(func() { cancel(); require.NoError(t, <-done) })
 			select {
 			case <-entered:
@@ -85,7 +90,7 @@ func TestIdleLifecycleDoesNotOwnTaskPublication(t *testing.T) {
 			} else {
 				require.Eventually(t, func() bool {
 					_, snapshot, err := store.ReserveSessionCheckpoint(t.Context(), checkpoint, "alice", "checkpoint")
-					return err == nil && snapshot.URI == "s3://snapshots/snapshot-1"
+					return err == nil && snapshot.Reference != ""
 				}, 5*time.Second, 10*time.Millisecond)
 				require.EqualValues(t, 1, actors.mutations.Load(), "database retries must not suspend the actor again")
 				require.Equal(t, test.finishFailures+1, writes.attempts.Load())

@@ -7,8 +7,7 @@ import (
 	"slices"
 	"strings"
 
-	atev1alpha1 "github.com/agent-substrate/substrate/pkg/api/v1alpha1"
-	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
+	ax "github.com/google/ax/pkg/apis/v1alpha1"
 	"github.com/kagent-dev/kagent/go/core/internal/service/serviceerrors"
 	"github.com/kagent-dev/kagent/go/core/internal/version"
 	"github.com/kagent-dev/kagent/go/core/pkg/auth"
@@ -24,17 +23,11 @@ type Version struct {
 	BuildDate     string
 }
 
-type ATEClient interface {
-	ListActorTemplates(context.Context, string) ([]*ateapipb.ActorTemplate, error)
-	ListActorsPage(ctx context.Context, atespace string, pageSize int32, pageToken string) ([]*ateapipb.Actor, string, error)
-	ListWorkersPage(ctx context.Context, pageSize int32, pageToken string) ([]*ateapipb.Worker, string, error)
-}
-
 type Service struct {
 	kubeClient         client.Client
 	observedNamespaces []string
 	authorizer         auth.Authorizer
-	ateClient          ATEClient
+	runtime            ax.AXClient
 }
 
 type Namespace struct {
@@ -46,13 +39,13 @@ func NewService(
 	kubeClient client.Client,
 	observedNamespaces []string,
 	authorizer auth.Authorizer,
-	ateClient ATEClient,
+	runtime ax.AXClient,
 ) *Service {
 	return &Service{
 		kubeClient:         kubeClient,
 		observedNamespaces: slices.Clone(observedNamespaces),
 		authorizer:         authorizer,
-		ateClient:          ateClient,
+		runtime:            runtime,
 	}
 }
 
@@ -147,53 +140,28 @@ func namespacesFromNames(names []string) []Namespace {
 	return result
 }
 
-func (s *Service) substrateNamespaces(requested string) []string {
-	if requested != "" {
-		return []string{requested}
+// ListTaskGroups is a configuration query, not an infrastructure inventory API.
+func (s *Service) ListTaskGroups(ctx context.Context, namespace string, size int32, token string) (*ax.ListTaskGroupsResponse, error) {
+	if namespace == "" {
+		return nil, serviceerrors.NewInvalidArgument("namespace is required", nil)
 	}
-	if len(s.observedNamespaces) > 0 {
-		return slices.Clone(s.observedNamespaces)
+	if len(s.observedNamespaces) > 0 && !slices.Contains(s.observedNamespaces, namespace) {
+		return nil, serviceerrors.NewPermissionDenied("Namespace is outside the configured scope", nil)
 	}
-	return []string{""}
-}
-
-func (s *Service) listWorkerPools(ctx context.Context, namespace string) ([]atev1alpha1.WorkerPool, error) {
-	var options []client.ListOption
-	if namespace != "" {
-		options = append(options, client.InNamespace(namespace))
-	}
-
-	workerPoolList := &atev1alpha1.WorkerPoolList{}
-	if err := s.kubeClient.List(ctx, workerPoolList, options...); err != nil {
+	if err := s.authorize(ctx, auth.VerbGet, auth.Resource{Type: "TaskGroup", Namespace: namespace}); err != nil {
 		return nil, err
 	}
-
-	return workerPoolList.Items, nil
-}
-
-// substrateActorTemplates drains upstream pagination for the configuration-sized list.
-func (s *Service) substrateActorTemplates(ctx context.Context, atespace string) ([]*ateapipb.ActorTemplate, error) {
-	templatesFromAPI, err := s.ateClient.ListActorTemplates(ctx, atespace)
+	if s.runtime == nil {
+		return nil, serviceerrors.NewUnavailable("AX is not configured", nil)
+	}
+	result, err := s.runtime.ListTaskGroups(ctx, &ax.ListTaskGroupsRequest{Atespace: namespace, PageSize: size, PageToken: token})
 	if err != nil {
-		return nil, err
+		return nil, serviceerrors.NewUnavailable("Failed to list AX TaskGroups", err)
 	}
-	templates := make([]*ateapipb.ActorTemplate, 0, len(templatesFromAPI))
-	for _, template := range templatesFromAPI {
-		if template == nil {
-			continue
+	for _, group := range result.Groups {
+		if group.GetMetadata().GetAtespace() != namespace {
+			return nil, serviceerrors.NewInternal("AX returned a group outside the requested namespace", nil)
 		}
-		// Only expose inventory fields: containers can contain resolved credentials.
-		templates = append(templates, &ateapipb.ActorTemplate{
-			Metadata:       template.GetMetadata(),
-			Status:         template.GetStatus(),
-			SandboxConfig:  template.GetSandboxConfig(),
-			WorkerSelector: template.GetWorkerSelector(),
-		})
 	}
-
-	slices.SortStableFunc(templates, func(left, right *ateapipb.ActorTemplate) int {
-		leftMetadata, rightMetadata := left.GetMetadata(), right.GetMetadata()
-		return strings.Compare(leftMetadata.GetAtespace()+"/"+leftMetadata.GetName(), rightMetadata.GetAtespace()+"/"+rightMetadata.GetName())
-	})
-	return templates, nil
+	return result, nil
 }

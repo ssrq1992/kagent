@@ -8,7 +8,7 @@ import (
 	"reflect"
 
 	a2apb "github.com/a2aproject/a2a-go/v2/a2apb/v1"
-	atev1alpha1 "github.com/agent-substrate/substrate/pkg/api/v1alpha1"
+	ax "github.com/google/ax/pkg/apis/v1alpha1"
 	"github.com/kagent-dev/kagent/go/core/internal/egress"
 	"google.golang.org/protobuf/proto"
 	corev1 "k8s.io/api/core/v1"
@@ -54,9 +54,9 @@ type Revision struct {
 	ConfigJSON []byte
 	AgentCard  *a2apb.AgentCard
 
-	// WorkerPoolName, SandboxClass and SnapshotLocation control Substrate placement and state.
-	WorkerPoolName   string
-	SandboxClass     atev1alpha1.SandboxClass
+	// GroupRef pins the AX capacity identity; SnapshotLocation is an optional override.
+	TaskGroupName    string
+	GroupRef         *ax.ResourceRef
 	SnapshotLocation string
 
 	// Provenance identifies non-secret Kubernetes inputs. Gateway-fetched
@@ -70,10 +70,12 @@ type Revision struct {
 
 // Equals compares the Agent Card's contents without inspecting protobuf caches.
 func (r Revision) Equals(other Revision) bool {
-	if !proto.Equal(r.AgentCard, other.AgentCard) {
+	if !proto.Equal(r.AgentCard, other.AgentCard) || !proto.Equal(r.GroupRef, other.GroupRef) || !egress.CredentialsEqual(r.Credentials, other.Credentials) {
 		return false
 	}
 	r.AgentCard, other.AgentCard = nil, nil
+	r.GroupRef, other.GroupRef = nil, nil
+	r.Credentials, other.Credentials = nil, nil
 	return reflect.DeepEqual(r, other)
 }
 
@@ -81,35 +83,27 @@ func (r Revision) Equals(other Revision) bool {
 // behavior. The full digest is the database key; Kubernetes names use a short
 // prefix only for readability.
 func (r *Revision) Digest() (RevisionID, error) {
-	sandboxClass := r.SandboxClass
-	switch sandboxClass {
-	case "", atev1alpha1.SandboxClassGvisor:
-		sandboxClass = atev1alpha1.SandboxClassGvisor
-	case atev1alpha1.SandboxClassMicroVM:
-	default:
-		return RevisionID{}, fmt.Errorf("unsupported sandbox class %q", sandboxClass)
-	}
 	raw, err := json.Marshal(struct {
-		AgentName          string                   `json:"agentName"`
-		AgentUID           string                   `json:"agentUID"`
-		Namespace          string                   `json:"namespace"`
-		Image              string                   `json:"image"`
-		Command            []string                 `json:"command,omitempty"`
-		Args               []string                 `json:"args,omitempty"`
-		Environment        []corev1.EnvVar          `json:"environment"`
-		ConfigJSON         json.RawMessage          `json:"config"`
-		WorkerPoolName     string                   `json:"workerPoolName"`
-		SnapshotLocation   string                   `json:"snapshotLocation"`
-		Provenance         json.RawMessage          `json:"provenance"`
-		Credentials        []egress.Credential      `json:"credentials,omitempty"`
-		EgressDestinations []string                 `json:"egressDestinations"`
-		SandboxClass       atev1alpha1.SandboxClass `json:"sandboxClass"`
+		AgentName          string              `json:"agentName"`
+		AgentUID           string              `json:"agentUID"`
+		Namespace          string              `json:"namespace"`
+		Image              string              `json:"image"`
+		Command            []string            `json:"command,omitempty"`
+		Args               []string            `json:"args,omitempty"`
+		Environment        []corev1.EnvVar     `json:"environment"`
+		ConfigJSON         json.RawMessage     `json:"config"`
+		TaskGroupName      string              `json:"taskGroupName"`
+		SnapshotLocation   string              `json:"snapshotLocation"`
+		Provenance         json.RawMessage     `json:"provenance"`
+		Credentials        []egress.Credential `json:"credentials,omitempty"`
+		EgressDestinations []string            `json:"egressDestinations"`
+		GroupRef           *ax.ResourceRef     `json:"groupRef"`
 	}{
 		AgentName: r.AgentName, AgentUID: r.AgentUID, Namespace: r.Namespace,
 		Image: r.Image, Command: r.Command, Args: r.Args, Environment: r.Environment, ConfigJSON: r.ConfigJSON,
-		WorkerPoolName: r.WorkerPoolName, SnapshotLocation: r.SnapshotLocation, Provenance: r.Provenance,
+		TaskGroupName: r.TaskGroupName, SnapshotLocation: r.SnapshotLocation, Provenance: r.Provenance,
 		Credentials: r.Credentials, EgressDestinations: r.EgressDestinations,
-		SandboxClass: sandboxClass,
+		GroupRef: r.GroupRef,
 	})
 	if err != nil {
 		return RevisionID{}, fmt.Errorf("marshal runtime revision inputs: %w", err)

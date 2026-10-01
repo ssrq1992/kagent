@@ -1,7 +1,6 @@
 import { RuntimeState, RuntimeOperation } from "@/generated/kagent/api/v1alpha1/runtime_pb";
 import { AgentService, type Agent as PbAgent } from "@/generated/kagent/api/v1alpha1/agents_pb";
 import type { Agent, AgentResource } from "../domain/agents";
-import { ActorState, type Actor as PbActor, type ActorTemplate as PbActorTemplate, type Worker as PbWorker, SandboxClass } from "@/generated/ateapi_pb";
 import { ScheduledRunService } from "@/generated/kagent/api/v1alpha1/scheduled_runs_pb";
 /**
  * What each operation id actually calls.
@@ -63,9 +62,6 @@ import {
 } from "@/generated/kagent/api/v1alpha1/checkpoints_pb";
 import type { Checkpoint as PbCheckpoint } from "@/generated/kagent/api/v1alpha1/checkpoints_pb";
 import type { ToolServer as PbToolServer } from "@/generated/kagent/api/v1alpha1/tools_pb";
-import type {
-  SubstrateWorkerPool as PbSubstrateWorkerPool,
-} from "@/generated/kagent/api/v1alpha1/system_pb";
 import type { StructuredObject } from "@/generated/kagent/api/v1alpha1/common_pb";
 import { ApiError, fromConnectError, rethrowIfAborted } from "../ApiError";
 import { operationContext, serviceClient } from "../transport";
@@ -75,7 +71,6 @@ import {
   list,
   orUndefined,
   refToString,
-  toNumber,
   unwrap,
   wrap,
 } from "./wire";
@@ -85,12 +80,6 @@ import type {
   ToolsResponse,
 } from "../domain/mcpServers";
 import type { PromptTemplateDetail, PromptTemplateSummary } from "../domain/prompts";
-import type {
-  SubstrateActorEntry,
-  SubstrateActorTemplateEntry,
-  SubstrateWorkerEntry,
-  SubstrateWorkerPoolEntry,
-} from "../domain/substrate";
 import type { Harness } from "../domain/harnesses";
 import type {
   AgentTemplate,
@@ -107,9 +96,7 @@ import type { Checkpoint, CheckpointState } from "../domain/checkpoints";
 import type {
   ApiOperations,
   OperationCallOptions,
-  SubstratePageInput,
 } from "../operations";
-import type { Timestamp } from "@bufbuild/protobuf/wkt";
 import { createContextValues } from "@connectrpc/connect";
 import { getChatClient } from "../chat";
 
@@ -1237,118 +1224,10 @@ const agentBuildingBlocks: Pick<
 
 // region Cluster
 
-/** Convert upstream inventory rows for the UI. */
-function toWorkerPoolEntry(pool: PbSubstrateWorkerPool): SubstrateWorkerPoolEntry {
-  const ref = required(pool.ref, "Substrate", "worker pool reference");
-  const resource = unwrap<{ spec: { replicas: number; workerImage: string } }>(
-    pool.resource, "Substrate", "worker pool resource",
-  );
-  const spec = required(resource.spec, "Substrate", "worker pool spec");
-  return {
-    namespace: ref.namespace,
-    name: ref.name,
-    replicas: spec.replicas,
-    ateomImage: spec.workerImage,
-  };
-}
-
-function toActorTemplateEntry(
-  actorTemplate: PbActorTemplate,
-): SubstrateActorTemplateEntry {
-  const metadata = required(
-    actorTemplate.metadata,
-    "Substrate",
-    "actor template metadata",
-  );
-  const golden = actorTemplate.status?.goldenSnapshotStatus;
-  return {
-    atespace: metadata.atespace,
-    name: metadata.name,
-    phase: golden?.errorMessage
-      ? "Failed"
-      : golden?.goldenTag ? "Ready" : "Pending",
-    goldenTag: golden?.goldenTag ? `${golden.goldenTag.atespace}/${golden.goldenTag.name}` : undefined,
-    sandboxClass:
-      SandboxClass[
-        actorTemplate.sandboxConfig?.sandboxClass ?? SandboxClass.UNSPECIFIED
-      ]?.toLowerCase(),
-    workerSelector: orUndefined(
-      Object.entries(actorTemplate.workerSelector?.matchLabels ?? {})
-        .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
-        .map(([key, value]) => `${key}=${value}`)
-        .join(","),
-    ),
-  };
-}
-
-// Display names for upstream actor states.
-const ACTOR_STATUS_LABELS: Record<ActorState, string> = {
-  [ActorState.UNSPECIFIED]: "Unknown",
-  [ActorState.RESUMING]: "Resuming",
-  [ActorState.RUNNING]: "Running",
-  [ActorState.SUSPENDING]: "Suspending",
-  [ActorState.SUSPENDED]: "Suspended",
-  [ActorState.PAUSING]: "Pausing",
-  [ActorState.PAUSED]: "Paused",
-  [ActorState.CRASHED]: "ACTOR_STATE_CRASHED",
-  [ActorState.DELETING]: "ACTOR_STATE_DELETING",
-  [ActorState.REVERTING]: "Reverting",
-};
-
-function toActorEntry(actor: PbActor): SubstrateActorEntry {
-  const metadata = required(actor.metadata, "Substrate", "actor metadata");
-  const state = actor.status?.state ?? ActorState.UNSPECIFIED;
-  const assignment = actor.status?.workerAssignment;
-  return {
-    actorId: metadata.name,
-    atespace: metadata.atespace,
-    status: ACTOR_STATUS_LABELS[state] ?? String(state),
-    actorTemplateAtespace: orUndefined(actor.actorTemplate?.atespace),
-    actorTemplateName: orUndefined(actor.actorTemplate?.name),
-    ateomPodNamespace: orUndefined(assignment?.workerNamespace),
-    ateomPodName: orUndefined(assignment?.workerPod),
-    ateomPodIp: orUndefined(assignment?.workerPodIp),
-    latestSnapshot: orUndefined(actor.status?.externalSnapshot?.snapshotUri),
-    workerPoolName: orUndefined(assignment?.workerPool),
-    inProgressSnapshot: orUndefined(actor.status?.inProgressLocalSnapshotName),
-    version: toNumber(metadata.version),
-  };
-}
-
-function toWorkerEntry(worker: PbWorker): SubstrateWorkerEntry {
-  return {
-    workerNamespace: worker.workerNamespace,
-    workerPool: worker.workerPool,
-    workerPod: worker.workerPod,
-    ip: orUndefined(worker.ip),
-    version: toNumber(worker.metadata?.version),
-  };
-}
-
-function substratePageRequest(input: SubstratePageInput) {
-  return { page: { limit: input.limit ?? 0, pageToken: input.pageToken ?? "" } };
-}
-
-function substratePageResult(response: {
-  ateApiError: string;
-  page?: { nextPageToken: string };
-  computedAt?: Timestamp;
-}) {
-  return {
-    ateApiError: orUndefined(response.ateApiError),
-    // Absent rather than empty: a caller testing presence must not be handed `""`,
-    // which would send it back to page one for ever.
-    nextPageToken: orUndefined(response.page?.nextPageToken ?? ""),
-    computedAt: orUndefined(isoFrom(response.computedAt)),
-  };
-}
-
 const cluster: Pick<
   ApiOperations,
   | "namespaces.list"
-  | "substrate.summary"
-  | "substrate.actors"
-  | "substrate.workers"
+  | "taskGroups.list"
 > = {
   "namespaces.list": async (_input, options) => {
     const response = await rpc("SystemService/ListNamespaces", options.signal, () =>
@@ -1360,55 +1239,19 @@ const cluster: Pick<
     }));
   },
 
-  "substrate.summary": async (input, options) => {
-    const response = await rpc("SystemService/GetSubstrateSummary", options.signal, () =>
-      serviceClient(SystemService).getSubstrateSummary(
-        input,
-        call("substrate.summary", options),
+  "taskGroups.list": async (input, options) => {
+    const response = await rpc("SystemService/ListTaskGroups", options.signal, () =>
+      serviceClient(SystemService).listTaskGroups(
+        { namespace: input.namespace, page: { limit: input.limit ?? 0, pageToken: input.pageToken ?? "" } },
+        call("taskGroups.list", options),
       ),
     );
     return {
-      ateApiError: orUndefined(response.ateApiError),
-      workerPools: list(response.workerPools).map(toWorkerPoolEntry),
-      actorTemplates: list(response.actorTemplates).map(toActorTemplateEntry),
-      actorCount: toNumber(response.actorCount) ?? 0,
-      workerCount: toNumber(response.workerCount) ?? 0,
-      runningActorCount: toNumber(response.runningActorCount) ?? 0,
-      busyWorkerCount: toNumber(response.busyWorkerCount) ?? 0,
-      actorStatusCounts: list(response.actorStatusCounts).map((entry) => ({
-        status: ACTOR_STATUS_LABELS[entry.state] ?? String(entry.state),
-        count: toNumber(entry.count) ?? 0,
-      })),
-      computedAt: orUndefined(isoFrom(response.computedAt)),
-    };
-  },
-
-  "substrate.actors": async (input, options) => {
-    const response = await rpc("SystemService/ListSubstrateActors", options.signal, () =>
-      serviceClient(SystemService).listSubstrateActors(
-        { ...substratePageRequest(input), atespace: input.atespace },
-        call("substrate.actors", options),
-      ),
-    );
-    return {
-      ...substratePageResult(response),
-      actors: list(response.actors).map(toActorEntry),
-    };
-  },
-
-  "substrate.workers": async (input, options) => {
-    const response = await rpc(
-      "SystemService/ListSubstrateWorkers",
-      options.signal,
-      () =>
-        serviceClient(SystemService).listSubstrateWorkers(
-          { ...substratePageRequest(input), namespace: input.namespace },
-          call("substrate.workers", options),
-        ),
-    );
-    return {
-      ...substratePageResult(response),
-      workers: list(response.workers).map(toWorkerEntry),
+      groups: list(response.groups).map((group) => {
+        const ref = required(group.ref, "ListTaskGroups", "group reference");
+        return { namespace: ref.namespace, name: ref.name, uid: group.uid, phase: group.phase, replicas: group.replicas };
+      }),
+      nextPageToken: orUndefined(response.page?.nextPageToken ?? ""),
     };
   },
 };

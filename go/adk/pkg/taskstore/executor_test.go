@@ -5,8 +5,6 @@ import (
 	"errors"
 	"iter"
 	"net"
-	"os"
-	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -169,7 +167,7 @@ func (s *settlementServer) SettleTask(context.Context, *apiv1alpha1.TaskStoreSer
 	// The final UpdateTask client span must already be exported when settlement
 	// can first make the actor eligible for suspension.
 	spans := s.exporter.GetSpans()
-	if len(spans) != 1 || spans[0].Name != "kagent.api.v1alpha1.TaskStoreService/UpdateTask" {
+	if len(spans) < 2 || spans[1].Name != "kagent.api.v1alpha1.TaskStoreService/UpdateTask" {
 		return nil, status.Error(codes.Internal, "final save span was not flushed before settlement")
 	}
 	s.settled.Store(true)
@@ -211,11 +209,7 @@ func TestSettlementFlushesFinalSaveAndSettlement(t *testing.T) {
 			})
 			require.NoError(t, err)
 			t.Cleanup(func() { require.NoError(t, client.Close()) })
-			dir := t.TempDir()
-			for field, value := range map[string]string{"name": "session-" + uuid.NewString(), "atespace": "team-a", "uid": "actor-uid"} {
-				require.NoError(t, os.WriteFile(filepath.Join(dir, field), []byte(value), 0o600))
-			}
-			store := New(client, filepath.Join(dir, "name"))
+			store := New(client)
 			flushes := 0
 			wrapper := store.WrapExecutor(a2asrv.AgentExecutorFunc(nil), "", func(ctx context.Context) error {
 				flushes++
@@ -242,8 +236,12 @@ func TestSettlementFlushesFinalSaveAndSettlement(t *testing.T) {
 			require.True(t, api.settled.Load())
 			require.Equal(t, 2, flushes)
 			spans := exporter.GetSpans()
-			require.Len(t, spans, 2)
-			require.Equal(t, "kagent.api.v1alpha1.TaskStoreService/SettleTask", spans[1].Name)
+			require.Len(t, spans, 4)
+			require.Equal(t, "kagent.api.v1alpha1.TaskStoreService/SettleTask", spans[3].Name)
 		})
 	}
+}
+
+func (*settlementServer) ResolveSession(context.Context, *apiv1alpha1.TaskStoreServiceResolveSessionRequest) (*apiv1alpha1.TaskStoreServiceResolveSessionResponse, error) {
+	return &apiv1alpha1.TaskStoreServiceResolveSessionResponse{SessionId: uuid.NewString()}, nil
 }

@@ -15,9 +15,7 @@ import (
 
 	a2atype "github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2apb/v1/pbconv"
-	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"github.com/kagent-dev/kagent/go/api/v1alpha3"
-	"github.com/kagent-dev/kagent/go/core/internal/substrate"
 	kagentenv "github.com/kagent-dev/kagent/go/core/pkg/env"
 	"github.com/kagent-dev/kagent/go/pkg/telemetry"
 	"github.com/kagent-dev/kagent/go/pkg/tracing"
@@ -307,7 +305,7 @@ func TestE2ECompletedChatFlushesTraces(t *testing.T) {
 				t.Fatalf("streamed task state = %s, want COMPLETED", streamed.state)
 			}
 			// Wait for the Actor to suspend then assert that the completed invocation span was exported.
-			assertActorSuspended(t, fixture)
+			assertAXTaskSuspended(t, fixture)
 			// Invocations are selected by operation alone, the way a consumer
 			// counts them, so a second invoke_agent span in the trace or one
 			// missing an attribute fails the test rather than going unseen. The
@@ -488,19 +486,21 @@ func sendTracingMessage(t *testing.T, fixture *interactionFixture, text string) 
 	}
 }
 
-func assertActorSuspended(t *testing.T, fixture *interactionFixture) {
+func assertAXTaskSuspended(t *testing.T, fixture *interactionFixture) {
 	t.Helper()
-	actorID := substrate.ActorName(fixture.sessionID)
+	taskName := "session-" + fixture.sessionID
+	runtime := newAXRuntimeClient(t)
+	namespace, _, _ := strings.Cut(fixture.tenant, "/")
 	ctx, cancel := context.WithTimeout(metadata.AppendToOutgoingContext(t.Context(), "x-user-id", "e2e"), 30*time.Second)
 	defer cancel()
 	err := wait.PollUntilContextTimeout(ctx, time.Second, 30*time.Second, true, func(ctx context.Context) (bool, error) {
-		actor, err := findSubstrateActor(ctx, fixture.system, "", actorID)
+		actor, err := findAXTask(ctx, runtime, namespace, taskName)
 		if err != nil {
 			return false, err
 		}
-		return actor != nil && actor.GetStatus().GetState() == ateapipb.ActorState_ACTOR_STATE_SUSPENDED, nil
+		return actor != nil && actor.GetStatus().GetRuntimeStatus().GetPhase() == "Suspended", nil
 	})
 	if err != nil {
-		t.Fatalf("Actor %s did not reach Suspended: %v", actorID, err)
+		t.Fatalf("AX Task %s did not reach Suspended: %v", taskName, err)
 	}
 }

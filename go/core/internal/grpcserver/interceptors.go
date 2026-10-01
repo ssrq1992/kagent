@@ -12,7 +12,7 @@ import (
 	"time"
 
 	a2apb "github.com/a2aproject/a2a-go/v2/a2apb/v1"
-	apia2a "github.com/kagent-dev/kagent/go/api/a2a"
+	ax "github.com/google/ax/pkg/apis/v1alpha1"
 	"github.com/kagent-dev/kagent/go/core/internal/service/serviceerrors"
 	sessionsvc "github.com/kagent-dev/kagent/go/core/internal/service/session"
 	"github.com/kagent-dev/kagent/go/core/pkg/auth"
@@ -25,11 +25,11 @@ import (
 )
 
 var forwardedMetadataKeys = map[string]string{
-	apia2a.InsecureRuntimeIdentityHeader: apia2a.InsecureRuntimeIdentityHeader,
-	"authorization":                      "Authorization",
-	"x-user-id":                          "X-User-Id",
-	"x-agent-name":                       "X-Agent-Name",
-	"x-share-token":                      "X-Share-Token",
+	ax.RuntimeCredentialHeader: ax.RuntimeCredentialHeader,
+	"authorization":            "Authorization",
+	"x-user-id":                "X-User-Id",
+	"x-agent-name":             "X-Agent-Name",
+	"x-share-token":            "X-Share-Token",
 }
 
 func authenticationUnaryInterceptor(authenticator, runtimeAuthenticator auth.AuthProvider, shareStore sessionsvc.ShareStore, policies MethodPolicies) grpc.UnaryServerInterceptor {

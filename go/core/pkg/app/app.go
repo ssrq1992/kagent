@@ -20,9 +20,9 @@ import (
 	"strings"
 	"time"
 
-	atev1alpha1 "github.com/agent-substrate/substrate/pkg/api/v1alpha1"
 	kagentv1alpha3 "github.com/kagent-dev/kagent/go/api/v1alpha3"
 	"github.com/kagent-dev/kagent/go/core/internal/a2agateway"
+	"github.com/kagent-dev/kagent/go/core/internal/axruntime"
 	v2controller "github.com/kagent-dev/kagent/go/core/internal/controller"
 	mcpservercontroller "github.com/kagent-dev/kagent/go/core/internal/controller/mcpserver"
 	remotemcpcontroller "github.com/kagent-dev/kagent/go/core/internal/controller/remotemcpserver"
@@ -42,7 +42,6 @@ import (
 	systemservice "github.com/kagent-dev/kagent/go/core/internal/service/system"
 	"github.com/kagent-dev/kagent/go/core/internal/service/taskstore"
 	toolservice "github.com/kagent-dev/kagent/go/core/internal/service/tool"
-	"github.com/kagent-dev/kagent/go/core/internal/substrate"
 	v2translator "github.com/kagent-dev/kagent/go/core/internal/translator"
 	"github.com/kagent-dev/kagent/go/core/internal/version"
 	"github.com/kagent-dev/kagent/go/core/pkg/auth"
@@ -157,6 +156,9 @@ func SetupLogger() error {
 // fails. It returns the first error rather than exiting, so a library consumer
 // keeps control of how the process ends.
 func Run(ctx context.Context, opts Options) error {
+	if kagentenv.APITLSCertFile.Get() == "" || kagentenv.APITLSKeyFile.Get() == "" {
+		return fmt.Errorf("AX runtime callbacks require KAGENT_API_TLS_CERT_FILE and KAGENT_API_TLS_KEY_FILE")
+	}
 	if err := SetupLogger(); err != nil {
 		return err
 	}
@@ -225,7 +227,6 @@ func Run(ctx context.Context, opts Options) error {
 	managerScheme := k8sruntime.NewScheme()
 	utilruntime.Must(clientgoscheme.AddToScheme(managerScheme))
 	utilruntime.Must(kagentv1alpha3.AddToScheme(managerScheme))
-	utilruntime.Must(atev1alpha1.AddToScheme(managerScheme))
 	utilruntime.Must(kmcp.AddToScheme(managerScheme))
 	watchNamespaces := namespaces(kagentenv.WatchNamespaces.Get())
 	managerClientOptions := client.Options{}
@@ -262,24 +263,20 @@ func Run(ctx context.Context, opts Options) error {
 	if err != nil {
 		return err
 	}
-	actors, err := substrate.Dial(ctx, substrate.Config{
-		AteAPIEndpoint: env(kagentenv.SubstrateATEAPIEndpoint),
-		CAFile:         kagentenv.SubstrateATEAPICAFile.Get(),
-		ClientCertFile: kagentenv.SubstrateATEAPIClientCertFile.Get(),
-		CallTimeout:    30 * time.Second,
-	})
+	axClient, err := axruntime.Dial(ctx, axruntime.Config{Endpoint: kagentenv.AXEndpoint.Get(), CAFile: kagentenv.AXCAFile.Get(), ClientCertFile: kagentenv.AXClientCertFile.Get(), ClientKeyFile: kagentenv.AXClientKeyFile.Get(), ServerName: kagentenv.AXServerName.Get()})
 	if err != nil {
-		return err
+		return fmt.Errorf("connect AX runtime: %w", err)
 	}
-	defer actors.Close()
-	reconciler, err := v2controller.NewReconciler(kubeConfig, runtime.Collections, store, actors)
+	defer axClient.Close()
+
+	reconciler, err := v2controller.NewReconciler(kubeConfig, runtime.Collections, store, axClient)
 	if err != nil {
 		return err
 	}
 	if err := manager.Add(reconciler); err != nil {
 		return fmt.Errorf("add reconciler to controller manager: %w", err)
 	}
-	if err := manager.Add(v2controller.NewRuntimeRevisionGC(store, actors)); err != nil {
+	if err := manager.Add(v2controller.NewRuntimeRevisionGC(store, axClient)); err != nil {
 		return fmt.Errorf("add runtime revision GC to controller manager: %w", err)
 	}
 	if opts.SetupWithManager != nil {
@@ -302,9 +299,9 @@ func Run(ctx context.Context, opts Options) error {
 	models := modelservice.NewService(manager.GetClient(), authorizer, resourceNamespace)
 	tools := toolservice.NewService(manager.GetClient(), store, authorizer, resourceNamespace, mcpClient)
 	prompts := prompttemplateservice.NewService(manager.GetClient(), authorizer)
-	system := systemservice.NewService(manager.GetClient(), watchNamespaces, authorizer, actors)
+	system := systemservice.NewService(manager.GetClient(), watchNamespaces, authorizer, axClient)
 	memory := memoryservice.NewService(store)
-	sessionWorkflow := sessionsvc.NewActorWorkflow(store, actors)
+	sessionWorkflow := sessionsvc.NewTaskWorkflow(store, axClient)
 	runtimeTasks := taskstore.NewService(store)
 	if err := manager.Add(sessionWorkflow); err != nil {
 		return fmt.Errorf("register idle session worker: %w", err)
@@ -317,10 +314,10 @@ func Run(ctx context.Context, opts Options) error {
 		return fmt.Errorf("register session expiration worker: %w", err)
 	}
 	sessions := sessionsvc.NewService(store, authorizer, sessionWorkflow)
-	checkpoints := checkpoint.NewService(store, authorizer, actors, sessionWorkflow)
+	checkpoints := checkpoint.NewService(store, authorizer, axClient, sessionWorkflow)
 	gatewayDialer, err := a2agateway.NewRuntimeDialer(
-		kagentenv.SubstrateAtenetRouterURL.Get(),
-		authenticator,
+		axClient.Connection(),
+		store,
 	)
 	if err != nil {
 		return err
@@ -337,24 +334,19 @@ func Run(ctx context.Context, opts Options) error {
 		return fmt.Errorf("add scheduled run controller: %w", err)
 	}
 	sandboxTemplates := kubecrud.NewService(manager.GetClient(), authorizer, &kagentv1alpha3.SandboxTemplate{}, &kagentv1alpha3.SandboxTemplateList{}, kagentv1alpha3.SandboxTemplateKind)
-	guests, err := sandboxservice.NewGuestDialer(kagentenv.SubstrateAtenetRouterURL.Get(), authenticator)
-	if err != nil {
-		return err
+	guests := sandboxservice.NewGuestDialer(axClient.Connection())
+	policy := axruntime.SandboxPolicy{
+		CPU:    kagentenv.SandboxCPU.Get(),
+		Memory: kagentenv.SandboxMemory.Get(),
 	}
-	defer guests.Close()
-	policy := substrate.SandboxPolicy{
-		GuestImage: env(kagentenv.SandboxGuestImage),
-		CPU:        kagentenv.SandboxCPU.Get(),
-		Memory:     kagentenv.SandboxMemory.Get(),
-	}
-	preparation, err := v2controller.NewSandboxReconciler(kubeConfig, runtime, store, actors, policy)
+	preparation, err := v2controller.NewSandboxReconciler(kubeConfig, runtime, store, axClient, policy)
 	if err != nil {
 		return err
 	}
 	if err := manager.Add(preparation); err != nil {
 		return err
 	}
-	sandboxes, err := sandboxservice.NewService(sandboxservice.Config{Store: store, Kube: manager.GetClient(), Authorizer: authorizer, Actors: actors, Guests: guests,
+	sandboxes, err := sandboxservice.NewService(sandboxservice.Config{Store: store, Kube: manager.GetClient(), Authorizer: authorizer, Runtime: axClient, Guests: guests,
 		DefaultTTL: kagentenv.SandboxDefaultTTL.Get(), MaxTTL: kagentenv.SandboxMaxTTL.Get()})
 	if err != nil {
 		return err
@@ -382,7 +374,9 @@ func Run(ctx context.Context, opts Options) error {
 		BindAddress:           env(kagentenv.HTTPBindAddress),
 		Reflection:            kagentenv.GRPCReflection.Get(),
 		Authenticator:         authenticator,
-		RuntimeAuthenticator:  &taskstore.Authenticator{},
+		RuntimeAuthenticator:  &taskstore.Authenticator{Runtime: axClient},
+		TLSCertFile:           kagentenv.APITLSCertFile.Get(),
+		TLSKeyFile:            kagentenv.APITLSKeyFile.Get(),
 		ShareStore:            store,
 		ModelService:          models,
 		ToolService:           tools,

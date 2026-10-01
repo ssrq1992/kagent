@@ -86,7 +86,7 @@ export function HarnessNewPage() {
             />
           </Form.Item>
 
-          <HarnessFields draft={draft} onChange={setDraft} />
+          <HarnessFields namespace={namespace ?? ""} draft={draft} onChange={setDraft} />
 
           {failure ? (
             <Alert

@@ -8,12 +8,14 @@ import (
 	"sync"
 	"time"
 
+	ax "github.com/google/ax/pkg/apis/v1alpha1"
 	kagentclient "github.com/kagent-dev/kagent/go/api/clientset/versioned/typed/api/v1alpha3"
 	kagentv1alpha3 "github.com/kagent-dev/kagent/go/api/v1alpha3"
+	"github.com/kagent-dev/kagent/go/core/internal/axruntime"
 	"github.com/kagent-dev/kagent/go/core/internal/database"
-	"github.com/kagent-dev/kagent/go/core/internal/substrate"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 	"istio.io/istio/pkg/kube/controllers"
 	"istio.io/istio/pkg/kube/krt"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
@@ -40,18 +42,18 @@ type sandboxRevisionStore interface {
 type SandboxReconciler struct {
 	collections sandboxCollections
 	store       sandboxRevisionStore
-	actors      actorTemplateClient
+	ax          ax.AXClient
 	client      kagentclient.ApiV1alpha3Interface
 }
 
 var _ manager.LeaderElectionRunnable = (*SandboxReconciler)(nil)
 
-func NewSandboxReconciler(config *rest.Config, runtime *Runtime, store sandboxRevisionStore, actors actorTemplateClient, policy substrate.SandboxPolicy) (*SandboxReconciler, error) {
+func NewSandboxReconciler(config *rest.Config, runtime *Runtime, store sandboxRevisionStore, runtimeClient ax.AXClient, policy axruntime.SandboxPolicy) (*SandboxReconciler, error) {
 	client, err := kagentclient.NewForConfig(config)
 	if err != nil {
 		return nil, fmt.Errorf("create SandboxTemplate client: %w", err)
 	}
-	return &SandboxReconciler{collections: newSandboxCollections(runtime.Collections, policy, runtime.Options), store: store, actors: actors, client: client}, nil
+	return &SandboxReconciler{collections: newSandboxCollections(runtime.Collections, policy, runtime.Options), store: store, ax: runtimeClient, client: client}, nil
 }
 
 func (s *SandboxReconciler) NeedLeaderElection() bool { return true }
@@ -84,19 +86,31 @@ func (s *SandboxReconciler) Start(ctx context.Context) error {
 // Kubernetes changes arrive through KRT. Poll only incomplete external work;
 // this also recovers transient failures after the queue's retry budget expires.
 func (s *SandboxReconciler) pollPending(ctx context.Context, preparations, statuses controllers.Queue) {
+	groups := time.NewTicker(10 * time.Second)
+	defer groups.Stop()
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-groups.C:
+			var refs []*ax.ResourceRef
+			for _, state := range s.collections.states.List() {
+				if state.Template.DeletionTimestamp.IsZero() {
+					refs = append(refs, &ax.ResourceRef{Atespace: state.Template.Namespace, Name: state.Template.Spec.AX.TaskGroupRef.Name})
+				}
+			}
+			refreshTaskGroups(ctx, s.ax, refs, func(group *ax.TaskGroup) {
+				s.collections.groups.ConditionalUpdateObject(sandboxGroupObservation{Ref: ax.Ref(group.Metadata)})
+			}, s.collections.groups.DeleteObject)
 		case <-ticker.C:
 			for _, state := range s.collections.states.List() {
 				if state.Template.DeletionTimestamp.IsZero() && !apiequality.Semantic.DeepEqual(sandboxStatusWithTransitionTimes(state), state.Template.Status) {
 					statuses.Add(state.ResourceName())
 				}
 				if !state.Template.DeletionTimestamp.IsZero() || !slices.Contains(state.Template.Finalizers, sandboxPreparationFinalizer) ||
-					(state.Failure != nil && state.Failure.Retryable) || (state.canPrepare() && state.ObservedActorTemplate.GetStatus().GetGoldenSnapshotStatus().GetGoldenTag() == nil) {
+					(state.Failure != nil && state.Failure.Retryable) || (state.canPrepare() && state.ObservedRuntime.GetPhase() != "Ready") {
 					preparations.Add(state.ResourceName())
 				}
 			}
@@ -138,7 +152,28 @@ func (s *SandboxReconciler) reconcile(ctx context.Context, key string) error {
 	}); err != nil {
 		return s.observeError(*state, fmt.Errorf("store SandboxTemplate %s definition: %w", key, err), true)
 	}
-	if state.DesiredActorTemplate == nil {
+	groupName := state.Template.Spec.AX.TaskGroupRef.Name
+	group, groupErr := s.ax.GetTaskGroup(ctx, &ax.GetTaskGroupRequest{Atespace: state.Template.Namespace, Name: groupName})
+	if groupErr != nil {
+		if status.Code(groupErr) == codes.NotFound {
+			s.collections.groups.DeleteObject(state.Template.Namespace + "/" + groupName)
+			s.collections.observations.DeleteObject(key)
+			return fmt.Errorf("resolve AX TaskGroup: %w", groupErr)
+		}
+		return s.observeError(*state, fmt.Errorf("resolve AX TaskGroup: %w", groupErr), true)
+	}
+	groupRef := ax.Ref(group.GetMetadata())
+	if err := ax.ValidateRef(groupRef, true); err != nil {
+		return err
+	}
+	if groupRef.Atespace != state.Template.Namespace || groupRef.Name != groupName {
+		return fmt.Errorf("AX returned a different TaskGroup")
+	}
+	if old := s.collections.groups.GetKey(state.Template.Namespace + "/" + groupName); old == nil || !proto.Equal(old.Ref, groupRef) {
+		s.collections.groups.ConditionalUpdateObject(sandboxGroupObservation{Ref: groupRef})
+		return nil
+	}
+	if state.DesiredRuntime == nil {
 		s.collections.observations.DeleteObject(key)
 	}
 	if state.CompilationError != "" {
@@ -147,30 +182,24 @@ func (s *SandboxReconciler) reconcile(ctx context.Context, key string) error {
 	if !state.canPrepare() {
 		return nil
 	}
-	ref := state.DesiredActorTemplate.GetMetadata()
-	observed, err := s.actors.GetActorTemplate(ctx, ref.GetAtespace(), ref.GetName())
+	ref := state.DesiredRuntime.GetMetadata()
+	observed, err := s.ax.GetPreparedRuntime(ctx, &ax.GetPreparedRuntimeRequest{Ref: ax.Ref(ref)})
 	if status.Code(err) == codes.NotFound {
-		if err := s.actors.EnsureAtespace(ctx, ref.GetAtespace()); err != nil {
-			return s.observeError(*state, fmt.Errorf("ensure sandbox Atespace: %w", err), true)
-		}
-		observed, err = s.actors.CreateActorTemplate(ctx, state.DesiredActorTemplate)
-		if status.Code(err) == codes.AlreadyExists {
-			observed, err = s.actors.GetActorTemplate(ctx, ref.GetAtespace(), ref.GetName())
-		}
+		observed, err = s.ax.PrepareRuntime(ctx, &ax.PrepareRuntimeRequest{Metadata: ref, Spec: state.DesiredRuntime.Spec, RequestId: state.RevisionID})
 	}
 	if err != nil {
-		return s.observeError(*state, fmt.Errorf("prepare sandbox ActorTemplate: %w", err), true)
+		return s.observeError(*state, fmt.Errorf("prepare sandbox AX runtime: %w", err), true)
 	}
-	if !substrate.ActorTemplateSpecEqual(observed, state.DesiredActorTemplate) {
-		return s.observeError(*state, fmt.Errorf("sandbox ActorTemplate immutable inputs disagree"), false)
+	if !proto.Equal(observed.Spec, state.DesiredRuntime.Spec) {
+		return s.observeError(*state, fmt.Errorf("sandbox AX runtime immutable inputs disagree"), false)
 	}
-	if message := observed.GetStatus().GetGoldenSnapshotStatus().GetErrorMessage(); message != "" {
-		return s.observeError(*state, fmt.Errorf("sandbox golden snapshot failed: %s", message), true)
+	if observed.Phase == "Failed" {
+		return s.observeError(*state, fmt.Errorf("sandbox preparation failed: %s", observed.Message), false)
 	}
-	ready := observed.GetStatus().GetGoldenSnapshotStatus().GetGoldenTag() != nil
+	ready := observed.Phase == "Ready"
 	revision := database.SandboxRevision{
 		RuntimeArtifact: database.RuntimeArtifact{Revision: state.RevisionID, Kind: "sandbox", Namespace: state.Template.Namespace,
-			ActorTemplateAtespace: ref.GetAtespace(), ActorTemplateName: ref.GetName(), ActorTemplateUID: observed.GetMetadata().GetUid()},
+			PreparedRuntimeAtespace: ref.GetAtespace(), PreparedRuntimeName: ref.GetName(), PreparedRuntimeUID: observed.GetMetadata().GetUid()},
 		SandboxTemplateName: state.Template.Name, SandboxTemplateUID: string(state.Template.UID),
 		SourceSnapshot: state.SourceSnapshot,
 	}
@@ -215,7 +244,7 @@ func sandboxStatusWithTransitionTimes(state sandboxReconciliation) kagentv1alpha
 	condition := metav1.Condition{Type: "Ready", Status: metav1.ConditionFalse, Reason: "Preparing", Message: "Waiting for the prepared sandbox snapshot", ObservedGeneration: state.Template.Generation}
 	if state.Failure != nil {
 		condition.Reason, condition.Message = state.Failure.Reason, state.Failure.Message
-	} else if state.ObservedActorTemplate.GetStatus().GetGoldenSnapshotStatus().GetGoldenTag() != nil {
+	} else if state.ObservedRuntime.GetPhase() == "Ready" {
 		condition.Status, condition.Reason, condition.Message = metav1.ConditionTrue, "Prepared", "Sandbox runtime is prepared"
 	}
 	desired.ObservedGeneration = state.Template.Generation

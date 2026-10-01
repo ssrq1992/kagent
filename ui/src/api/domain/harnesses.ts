@@ -92,9 +92,9 @@ export interface HarnessSpec {
   /** Bring your own: an image that serves kagent's A2A contract itself. */
   byo?: Record<string, never>;
   workload: { image: string; command?: string[]; args?: string[] };
-  substrate: {
-    workerPoolRef: { name: string };
-    snapshotPolicy: { location: string };
+  ax: {
+    taskGroupRef: { name: string };
+    snapshotLocationOverride?: string;
   };
   env?: { name: string; value?: string }[];
 }

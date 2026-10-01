@@ -33,10 +33,10 @@ type SandboxTemplateSpec struct {
 	// +listMapKey=name
 	Env []RuntimeEnvVar `json:"env,omitempty"`
 
-	// Substrate configures compute placement and snapshot storage. References are
+	// AX configures the TaskGroup and optional snapshot override. References are
 	// resolved in this template's namespace.
 	// +required
-	Substrate RuntimeSubstratePolicy `json:"substrate"`
+	AX RuntimeAXPolicy `json:"ax"`
 }
 
 // SandboxTemplateStatus reports preparation of the current template inputs.

@@ -23,23 +23,15 @@ type RuntimeEnvVar struct {
 	CredentialRef *corev1.SecretKeySelector `json:"credentialRef,omitempty"`
 }
 
-// RuntimeSnapshotPolicy configures storage for Substrate snapshots.
-type RuntimeSnapshotPolicy struct {
-	// Location is the snapshot storage location used by Substrate.
-	// +kubebuilder:validation:Pattern=`^[^[:space:]]+$`
+// RuntimeAXPolicy selects an AX TaskGroup in the resource's namespace.
+type RuntimeAXPolicy struct {
+	// TaskGroupRef references an administrator-managed AX TaskGroup.
+	// +kubebuilder:validation:XValidation:rule="self.name.size() > 0",message="taskGroupRef name must not be empty"
 	// +required
-	Location string `json:"location"`
-}
+	TaskGroupRef corev1.LocalObjectReference `json:"taskGroupRef"`
 
-// RuntimeSubstratePolicy contains the Substrate policy shared by all runtime variants.
-//
-// +kubebuilder:validation:XValidation:rule="self.workerPoolRef.name.size() > 0",message="workerPoolRef name must not be empty"
-type RuntimeSubstratePolicy struct {
-	// WorkerPoolRef references a WorkerPool in the resource's namespace.
-	// +required
-	WorkerPoolRef corev1.LocalObjectReference `json:"workerPoolRef"`
-
-	// SnapshotPolicy configures runtime snapshot storage.
-	// +required
-	SnapshotPolicy RuntimeSnapshotPolicy `json:"snapshotPolicy"`
+	// SnapshotLocationOverride optionally replaces the TaskGroup storage prefix.
+	// +kubebuilder:validation:Pattern=`^(gs|s3)://[^[:space:]]+$`
+	// +optional
+	SnapshotLocationOverride string `json:"snapshotLocationOverride,omitempty"`
 }

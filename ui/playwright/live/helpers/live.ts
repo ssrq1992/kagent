@@ -17,7 +17,6 @@ export const liveRoutes = {
   models: "/models",
   mcpServers: "/mcp",
   prompts: "/prompts",
-  substrate: "/substrate",
 } as const;
 
 /**

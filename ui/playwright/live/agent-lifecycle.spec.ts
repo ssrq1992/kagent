@@ -38,9 +38,14 @@ test.afterAll(async ({ baseURL }) => {
   for (const name of created) await api.removeAgent(NAMESPACE, name);
 });
 
-async function pick(page: Page, testId: string, title: string) {
+async function pick(page: Page, testId: string, title: string, group = false) {
   await page.getByTestId(testId).click();
-  await page.locator(`.ant-select-dropdown:visible .ant-select-item-option[title="${title}"]`).click();
+  const input = page.getByTestId(testId).getByRole("combobox");
+  await expect(input).toHaveAttribute("aria-expanded", "true");
+  const listId = await input.getAttribute("aria-controls");
+  const popup = page.locator(".ant-select-dropdown").filter({ has: page.locator(`[id="${listId}"]`) });
+  // TaskGroup labels also display phase and capacity, which can change while polling.
+  await popup.locator(group ? `.ant-select-item-option[title^="${title} ("]` : `.ant-select-item-option[title="${title}"]`).click();
 }
 
 async function chooseSource(page: Page, kind: "template" | "harness", source: Source) {
@@ -66,8 +71,8 @@ async function createAgent(page: Page, name: string, template: Source, harness: 
   if (harness === "inline") {
     await chooseSource(page, "harness", "inline");
     await page.getByTestId("harness-image").fill(harnessSpec.workload.image);
-    await page.getByTestId("harness-worker-pool").fill(harnessSpec.substrate.workerPoolRef.name);
-    await page.getByTestId("harness-snapshot").fill(`${harnessSpec.substrate.snapshotPolicy.location.replace(/\/$/, "")}/e2e-${name}`);
+    await pick(page, "harness-task-group", harnessSpec.ax.taskGroupRef.name, true);
+    if (harnessSpec.ax.snapshotLocationOverride) await page.getByTestId("harness-snapshot").fill(`${harnessSpec.ax.snapshotLocationOverride.replace(/\/$/, "")}/e2e-${name}`);
   } else {
     await pick(page, "agent-form-harness-ref", HARNESS);
   }

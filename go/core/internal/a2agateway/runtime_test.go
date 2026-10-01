@@ -3,28 +3,27 @@ package a2agateway
 import (
 	"context"
 	"net"
-	"net/http"
 	"testing"
 	"time"
 
 	a2atype "github.com/a2aproject/a2a-go/v2/a2a"
 	a2apb "github.com/a2aproject/a2a-go/v2/a2apb/v1"
+	ax "github.com/google/ax/pkg/apis/v1alpha1"
 	apiv1alpha1 "github.com/kagent-dev/kagent/go/api/gen/kagent/api/v1alpha1"
-	"github.com/kagent-dev/kagent/go/core/internal/substrate"
+	"github.com/kagent-dev/kagent/go/core/internal/database"
 	"github.com/kagent-dev/kagent/go/core/pkg/auth"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 )
 
-type runtimeTestAuth struct{ auth.AuthProvider }
+type runtimeTestBindings struct{}
 
-func (runtimeTestAuth) UpstreamAuth(req *http.Request, _ auth.Session, _ auth.Principal) error {
-	req.Header.Set("Authorization", "Bearer runtime-test")
-	req.Header.Set("ate-target-actor", "wrong/actor")
-	return nil
+func (runtimeTestBindings) GetAXBinding(context.Context, string) (database.AXBinding, error) {
+	return database.AXBinding{Task: &ax.ResourceRef{Atespace: "team", Name: "session-session", Uid: "task-uid"}}, nil
 }
 
 func TestRuntimeDialerRoutesUnaryAndStreamingCalls(t *testing.T) {
@@ -47,13 +46,17 @@ func TestRuntimeDialerRoutesUnaryAndStreamingCalls(t *testing.T) {
 	a2apb.RegisterA2AServiceServer(server, &a2apb.UnimplementedA2AServiceServer{})
 	go func() { _ = server.Serve(listener) }()
 	t.Cleanup(server.Stop)
-	dialer, err := NewRuntimeDialer("http://"+listener.Addr().String(), runtimeTestAuth{})
+	conn, err := grpc.NewClient(listener.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	require.NoError(t, err)
+	t.Cleanup(func() { conn.Close() })
+	dialer, err := NewRuntimeDialer(conn, runtimeTestBindings{})
 	require.NoError(t, err)
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 	ctx = auth.AuthSessionTo(ctx, auth.ControlPlaneSession{})
+	ctx = metadata.NewOutgoingContext(ctx, metadata.Pairs("authorization", "Bearer forged", ax.TargetTaskHeader, "wrong/task", ax.TargetTaskUIDHeader, "wrong-uid"))
 	client, err := dialer.Dial(ctx, &apiv1alpha1.Session{
-		Id: "session", A2AAuthority: substrate.ActorHost("team", "session-session", ""),
+		Id: "session", A2AAuthority: "forged-authority",
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, client.Destroy()) })
@@ -68,8 +71,9 @@ func TestRuntimeDialerRoutesUnaryAndStreamingCalls(t *testing.T) {
 	for range 2 {
 		select {
 		case md := <-received:
-			require.Equal(t, []string{"team/session-session"}, md.Get("ate-target-actor"))
-			require.Equal(t, []string{"Bearer runtime-test"}, md.Get("authorization"))
+			require.Equal(t, []string{"team/session-session"}, md.Get(ax.TargetTaskHeader))
+			require.Empty(t, md.Get("authorization"))
+			require.Equal(t, []string{"task-uid"}, md.Get(ax.TargetTaskUIDHeader))
 			require.Equal(t, []string{listener.Addr().String()}, md.Get(":authority"))
 		case <-ctx.Done():
 			t.Fatal("runtime did not receive both calls")

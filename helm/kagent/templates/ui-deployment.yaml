@@ -36,6 +36,9 @@ spec:
       {{- end }}
       serviceAccountName: {{ include "kagent.fullname" . }}-ui
       volumes:
+        - name: controller-ca
+          secret:
+            secretName: {{ required "controller.tls.caSecretName is required" .Values.controller.tls.caSecretName | quote }}
         - name: tmp
           emptyDir:
             sizeLimit: {{ .Values.ui.volumes.tmp }}
@@ -78,6 +81,9 @@ spec:
               containerPort: {{ .Values.ui.service.ports.targetPort }}
               protocol: TCP
           volumeMounts:
+            - name: controller-ca
+              mountPath: /run/controller-ca
+              readOnly: true
             - name: tmp
               mountPath: /tmp
             - name: ui-config

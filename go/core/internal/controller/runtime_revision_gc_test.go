@@ -3,6 +3,8 @@ package controller
 import (
 	"context"
 	"errors"
+	ax "github.com/google/ax/pkg/apis/v1alpha1"
+	"google.golang.org/grpc"
 	"sync"
 	"testing"
 	"testing/synctest"
@@ -17,8 +19,8 @@ func TestRuntimeRevisionGCStart(t *testing.T) {
 		ctx, cancel := context.WithCancel(t.Context())
 		defer cancel()
 		store := &fakeGCStore{revisions: []database.RuntimeArtifact{
-			{Revision: "failed", ActorTemplateName: "failed"},
-			{Revision: "healthy", ActorTemplateName: "healthy"},
+			{Revision: "failed", PreparedRuntimeName: "failed", PreparedRuntimeAtespace: "team", PreparedRuntimeUID: "failed-uid"},
+			{Revision: "healthy", PreparedRuntimeName: "healthy", PreparedRuntimeAtespace: "team", PreparedRuntimeUID: "healthy-uid"},
 		}, listErr: errors.New("database unavailable")}
 		templates := &fakeGCTemplates{deleteErr: errors.New("Substrate unavailable")}
 		collector := NewRuntimeRevisionGC(store, templates)
@@ -55,8 +57,8 @@ func TestRuntimeRevisionGCDeadlineAndCancellation(t *testing.T) {
 		ctx, cancel := context.WithCancel(t.Context())
 		defer cancel()
 		store := &fakeGCStore{revisions: []database.RuntimeArtifact{
-			{Revision: "failed", ActorTemplateName: "failed"},
-			{Revision: "healthy", ActorTemplateName: "healthy"},
+			{Revision: "failed", PreparedRuntimeName: "failed", PreparedRuntimeAtespace: "team", PreparedRuntimeUID: "failed-uid"},
+			{Revision: "healthy", PreparedRuntimeName: "healthy", PreparedRuntimeAtespace: "team", PreparedRuntimeUID: "healthy-uid"},
 		}}
 		templates := &fakeGCTemplates{block: true}
 		collector := NewRuntimeRevisionGC(store, templates)
@@ -115,20 +117,46 @@ func (s *fakeGCStore) DeleteRuntimeRevision(_ context.Context, id, _ string) err
 
 type fakeGCTemplates struct {
 	mu sync.Mutex
-	fakeActorTemplates
+	fakePreparedRuntimes
 	deleteErr error
 	block     bool
 }
 
-func (f *fakeGCTemplates) DeleteActorTemplate(ctx context.Context, _, name string) error {
+func (f *fakeGCTemplates) ReleasePreparedRuntime(ctx context.Context, req *ax.ReleasePreparedRuntimeRequest, _ ...grpc.CallOption) (*ax.ReleasePreparedRuntimeResponse, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if name == "failed" {
+	if req.Ref.Name == "failed" {
 		if f.block {
 			<-ctx.Done()
-			return ctx.Err()
+			return nil, ctx.Err()
 		}
-		return f.deleteErr
+		if f.deleteErr != nil {
+			return nil, f.deleteErr
+		}
 	}
-	return nil
+	return &ax.ReleasePreparedRuntimeResponse{}, nil
+}
+
+type sandboxGCClient struct {
+	ax.AXClient
+	request *ax.ReleasePreparedRuntimeRequest
+	failure error
+}
+
+func (c *sandboxGCClient) ReleasePreparedRuntime(_ context.Context, req *ax.ReleasePreparedRuntimeRequest, _ ...grpc.CallOption) (*ax.ReleasePreparedRuntimeResponse, error) {
+	c.request = req
+	return &ax.ReleasePreparedRuntimeResponse{}, c.failure
+}
+func TestSandboxRuntimeGCReleasesAXBeforeDatabase(t *testing.T) {
+	artifact := database.RuntimeArtifact{Revision: "revision", Kind: "sandbox", PreparedRuntimeAtespace: "team", PreparedRuntimeName: "runtime", PreparedRuntimeUID: "runtime-uid"}
+	store := &fakeGCStore{revisions: []database.RuntimeArtifact{artifact}}
+	client := &sandboxGCClient{failure: errors.New("AX release response unknown")}
+	gc := NewRuntimeRevisionGC(store, client)
+	require.Error(t, gc.collect(t.Context(), "revision"))
+	require.Empty(t, store.deleted)
+	require.Equal(t, "runtime-uid", client.request.Ref.Uid)
+	require.Equal(t, "gc-revision", client.request.OperationId)
+	client.failure = nil
+	require.NoError(t, gc.collect(t.Context(), "revision"))
+	require.Equal(t, []string{"revision"}, store.deleted)
 }

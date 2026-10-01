@@ -6,13 +6,13 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 )
 
-// WorkerPoolNotFoundError identifies an unresolved Harness capacity reference.
-type WorkerPoolNotFoundError struct {
-	WorkerPool types.NamespacedName
+// TaskGroupNotFoundError identifies an unresolved Harness capacity reference.
+type TaskGroupNotFoundError struct {
+	TaskGroup types.NamespacedName
 }
 
-func (e *WorkerPoolNotFoundError) Error() string {
-	return fmt.Sprintf("WorkerPool %q not found", e.WorkerPool.String())
+func (e *TaskGroupNotFoundError) Error() string {
+	return fmt.Sprintf("TaskGroup %q not found", e.TaskGroup.String())
 }
 
 // ValidationError marks a resolved but unsupported public configuration. The

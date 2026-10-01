@@ -12,7 +12,7 @@ import (
 	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
+	ax "github.com/google/ax/pkg/apis/v1alpha1"
 	"github.com/google/uuid"
 	kagentfake "github.com/kagent-dev/kagent/go/api/clientset/versioned/fake"
 	apiv1alpha1 "github.com/kagent-dev/kagent/go/api/gen/kagent/api/v1alpha1"
@@ -21,6 +21,7 @@ import (
 	"github.com/kagent-dev/kagent/go/core/internal/dbtest"
 	v2translator "github.com/kagent-dev/kagent/go/core/internal/translator"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"istio.io/istio/pkg/kube/krt"
@@ -34,7 +35,7 @@ func TestReconcilerPersistsPairInOrder(t *testing.T) {
 	t.Cleanup(func() { close(stop) })
 	opts := krt.NewOptionsBuilder(stop, "test", nil)
 	template := &kagentv1alpha3.Agent{ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "assistant", UID: "template-uid"}}
-	desiredActor := &ateapipb.ActorTemplate{Metadata: &ateapipb.ResourceMetadata{Atespace: "team-a", Name: "assistant-kagent-revision"}}
+	desiredActor := &ax.PreparedRuntime{Metadata: &ax.ObjectMeta{Atespace: "team-a", Name: "assistant-kagent-revision"}}
 	revision := &v2translator.Revision{AgentCard: &a2apb.AgentCard{Name: "assistant"}}
 	revision.AgentCard.ProtoReflect().SetUnknown(protowire.AppendString(protowire.AppendTag(nil, 1000, protowire.BytesType), "future"))
 	revisionID, err := revision.Digest()
@@ -43,7 +44,7 @@ func TestReconcilerPersistsPairInOrder(t *testing.T) {
 	}
 	state := AgentReconciliation{
 		Agent:  template,
-		Target: &compiledTarget{Revision: *revision, RevisionID: revisionID, ActorTemplate: desiredActor},
+		Target: &compiledTarget{Revision: *revision, RevisionID: revisionID, Runtime: desiredActor},
 	}
 	reconciliations := krt.NewStaticCollection(nil, []AgentReconciliation{state}, opts.WithName("Reconciliations")...)
 	status := kagentv1alpha3.AgentStatus{ObservedGeneration: 1, Conditions: []metav1.Condition{{Type: kagentv1alpha3.AgentConditionReady, Status: metav1.ConditionFalse}}}
@@ -53,7 +54,7 @@ func TestReconcilerPersistsPairInOrder(t *testing.T) {
 	})
 	statuses := krttest.GetMockCollection[krt.ObjectWithStatus[*kagentv1alpha3.Agent, kagentv1alpha3.AgentStatus]](mock)
 	store := &fakeRuntimeRevisionStore{}
-	templates := &fakeActorTemplates{}
+	templates := &fakePreparedRuntimes{}
 	statusClient := kagentfake.NewSimpleClientset(template.DeepCopy()).ApiV1alpha3()
 	reconciler := &Reconciler{
 		collections: Collections{
@@ -81,13 +82,13 @@ func TestReconcilerPersistsPairInOrder(t *testing.T) {
 	require.True(t, proto.Equal(revision.AgentCard, store.revision.AgentCard))
 
 	templates.template = proto.CloneOf(created)
-	templates.template.Status = &ateapipb.ActorTemplateStatus{GoldenSnapshotStatus: &ateapipb.GoldenSnapshotStatus{GoldenTag: &ateapipb.ObjectRef{Atespace: "ate-golden", Name: "golden"}}}
+	templates.template.Phase = "Ready"
 	writeErr := errors.New("database unavailable")
 	store.revisionErr = writeErr
 	require.ErrorIs(t, reconciler.reconcileAgent(t.Context(), state.ResourceName()), writeErr)
 	pending := reconciler.collections.AgentRuntimeObservations.GetKey(state.ResourceName())
 	require.NotNil(t, pending)
-	require.Nil(t, pending.Template.GetStatus().GetGoldenSnapshotStatus().GetGoldenTag(),
+	require.NotEqual(t, "Ready", pending.Template.GetPhase(),
 		"Ready must not be published before the database write succeeds")
 	store.revisionErr = nil
 	if err := reconciler.reconcileAgent(context.Background(), state.ResourceName()); err != nil {
@@ -98,7 +99,7 @@ func TestReconcilerPersistsPairInOrder(t *testing.T) {
 	}
 	require.Empty(t, store.retired, "active pairs must be replaced atomically by the store")
 	observed := reconciler.collections.AgentRuntimeObservations.GetKey(state.ResourceName())
-	require.NotNil(t, observed.Template.GetStatus().GetGoldenSnapshotStatus().GetGoldenTag())
+	require.Equal(t, "Ready", observed.Template.GetPhase())
 
 	if err := reconciler.reconcileAgentStatus(context.Background(), "team-a/assistant"); err != nil {
 		t.Fatal(err)
@@ -112,8 +113,8 @@ func TestReconcilerPersistsPairInOrder(t *testing.T) {
 	reconciler = &Reconciler{collections: reconciler.collections, templates: templates, store: store, status: statusClient}
 	nextTarget := *state.Target
 	state.Target = &nextTarget
-	state.Target.ActorTemplate = proto.CloneOf(state.Target.ActorTemplate)
-	state.Target.ActorTemplate.Metadata.Name = "assistant-next-revision"
+	state.Target.Runtime = proto.CloneOf(state.Target.Runtime)
+	state.Target.Runtime.Metadata.Name = "assistant-next-revision"
 	state.Target.Revision = v2translator.Revision{AgentCard: &a2apb.AgentCard{Name: "updated assistant"}}
 	state.Target.RevisionID, err = state.Target.Revision.Digest()
 	require.NoError(t, err)
@@ -156,7 +157,7 @@ func TestRuntimeRevisionGCCollectsRetiredRevisions(t *testing.T) {
 			store := database.NewClient(pool)
 			opts := krt.NewOptionsBuilder(ctx.Done(), "test", nil)
 			states := krt.NewStaticCollection[AgentReconciliation](nil, nil, opts.WithName("Reconciliations")...)
-			templates := &fakeActorTemplates{}
+			templates := &fakePreparedRuntimes{}
 			reconciler := &Reconciler{
 				collections: Collections{
 					AgentRuntimeObservations: krt.NewStaticCollection[AgentRuntimeObservation](nil, nil, opts.WithName("AgentRuntimeObservations")...),
@@ -169,16 +170,14 @@ func TestRuntimeRevisionGCCollectsRetiredRevisions(t *testing.T) {
 			}
 			id, err := revision.Digest()
 			require.NoError(t, err)
-			desired := &ateapipb.ActorTemplate{Metadata: &ateapipb.ResourceMetadata{
+			desired := &ax.PreparedRuntime{Metadata: &ax.ObjectMeta{
 				Atespace: "team-a", Name: "assistant-revision", Uid: "actor-uid",
 			}}
 			templates.template = proto.CloneOf(desired)
-			templates.template.Status = &ateapipb.ActorTemplateStatus{GoldenSnapshotStatus: &ateapipb.GoldenSnapshotStatus{
-				GoldenTag: &ateapipb.ObjectRef{Atespace: "ate-golden", Name: "golden"},
-			}}
+			templates.template.Phase = "Ready"
 			state := AgentReconciliation{
 				Agent:  &kagentv1alpha3.Agent{ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "assistant", UID: "agent-uid"}},
-				Target: &compiledTarget{Revision: *revision, RevisionID: id, ActorTemplate: desired},
+				Target: &compiledTarget{Revision: *revision, RevisionID: id, Runtime: desired},
 			}
 			states.UpdateObject(state)
 			require.NoError(t, reconciler.reconcileAgent(ctx, state.ResourceName()))
@@ -254,18 +253,20 @@ func (s *failingFinalizationStore) DeleteRuntimeRevision(ctx context.Context, re
 	return s.Client.DeleteRuntimeRevision(ctx, revision, uid)
 }
 
-type fakeActorTemplates struct {
-	template           *ateapipb.ActorTemplate
-	ensureErr          error
-	getErr             error
-	createErr          error
-	deleteErr          error
-	deletedBeforeError bool
+type fakePreparedRuntimes struct {
+	ax.AXClient
+	template                     *ax.PreparedRuntime
+	getErr, createErr, deleteErr error
+	deletedBeforeError           bool
 }
 
-func (f *fakeActorTemplates) EnsureAtespace(context.Context, string) error { return f.ensureErr }
-
-func (f *fakeActorTemplates) GetActorTemplate(context.Context, string, string) (*ateapipb.ActorTemplate, error) {
+func (f *fakePreparedRuntimes) GetTaskGroup(_ context.Context, req *ax.GetTaskGroupRequest, _ ...grpc.CallOption) (*ax.TaskGroup, error) {
+	if req.Name == "missing" {
+		return nil, status.Error(codes.NotFound, "missing group")
+	}
+	return nil, status.Error(codes.Unavailable, "group observations are supplied by KRT in this fixture")
+}
+func (f *fakePreparedRuntimes) GetPreparedRuntime(_ context.Context, req *ax.GetPreparedRuntimeRequest, _ ...grpc.CallOption) (*ax.PreparedRuntime, error) {
 	if f.getErr != nil {
 		return nil, f.getErr
 	}
@@ -274,25 +275,26 @@ func (f *fakeActorTemplates) GetActorTemplate(context.Context, string, string) (
 	}
 	return f.template, nil
 }
-
-func (f *fakeActorTemplates) CreateActorTemplate(_ context.Context, template *ateapipb.ActorTemplate) (*ateapipb.ActorTemplate, error) {
+func (f *fakePreparedRuntimes) PrepareRuntime(_ context.Context, req *ax.PrepareRuntimeRequest, _ ...grpc.CallOption) (*ax.PreparedRuntime, error) {
 	if f.createErr != nil {
 		return nil, f.createErr
 	}
-	f.template = proto.CloneOf(template)
-	f.template.Metadata.Uid = "actor-uid"
+	f.template = &ax.PreparedRuntime{Metadata: proto.CloneOf(req.Metadata), Spec: proto.CloneOf(req.Spec), Phase: "Preparing"}
+	f.template.Metadata.Uid = "runtime-uid"
 	return f.template, nil
 }
-
-func (f *fakeActorTemplates) DeleteActorTemplate(context.Context, string, string) error {
+func (f *fakePreparedRuntimes) ReleasePreparedRuntime(_ context.Context, req *ax.ReleasePreparedRuntimeRequest, _ ...grpc.CallOption) (*ax.ReleasePreparedRuntimeResponse, error) {
+	if f.template != nil && req.Ref.Uid != f.template.Metadata.Uid {
+		return nil, status.Error(codes.FailedPrecondition, "UID changed")
+	}
 	if f.deleteErr != nil {
 		if f.deletedBeforeError {
 			f.template = nil
 		}
-		return f.deleteErr
+		return nil, f.deleteErr
 	}
 	f.template = nil
-	return nil
+	return &ax.ReleasePreparedRuntimeResponse{}, nil
 }
 
 type fakeRuntimeRevisionStore struct {
@@ -365,7 +367,7 @@ func TestReconcilerUpdatesModelConfigStatusOnSecretHashChange(t *testing.T) {
 	statusClient := kagentfake.NewSimpleClientset(modelConfig.DeepCopy()).ApiV1alpha3()
 	reconciler := newReconciler(
 		collections,
-		&fakeActorTemplates{},
+		&fakePreparedRuntimes{},
 		&fakeRuntimeRevisionStore{},
 		statusClient,
 	)

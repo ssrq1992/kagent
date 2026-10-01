@@ -46,9 +46,9 @@ test("routing: in-app navigation, deep links, 404, and standalone routes", async
     // A full page load, not a client-side transition: this is the link someone
     // pastes into chat, and the one a server that does not fall back to
     // index.html would break.
-    await loadPage(page, routes.substrate, { title: "Substrate" });
+    await loadPage(page, routes.models, { title: "Models" });
     await expectShell(page);
-    await expect(page).toHaveURL(/\/substrate/);
+    await expect(page).toHaveURL(/\/models/);
   });
 
   await test.step("5. a deep link with route params renders too", async () => {

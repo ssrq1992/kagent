@@ -1,0 +1,32 @@
+name: Checkout paired AX
+description: Materialize the exact AX revision required by the sibling Go replacement and Docker context.
+inputs:
+  repository:
+    description: Repository containing the managed AX implementation
+    required: true
+  ref:
+    description: Full immutable commit SHA of the paired AX implementation
+    required: true
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        AX_REPOSITORY: ${{ inputs.repository }}
+        AX_REF: ${{ inputs.ref }}
+      run: |
+        test -n "$AX_REPOSITORY" || { echo '::error::Set AX_REPOSITORY to the paired AX repository'; exit 1; }
+        [[ "$AX_REF" =~ ^[0-9a-f]{40}$ ]] || { echo '::error::AX_REF must be an immutable paired AX commit SHA'; exit 1; }
+        test "$(basename "$GITHUB_WORKSPACE")" = kagent || { echo '::error::Build layout requires sibling kagent/ and ax/ directories'; exit 1; }
+    - uses: actions/checkout@v6
+      with:
+        repository: ${{ inputs.repository }}
+        ref: ${{ inputs.ref }}
+        path: .paired-ax
+        persist-credentials: false
+    - shell: bash
+      run: |
+        test ! -e ../ax || { echo '::error::Refusing to overwrite an existing sibling AX checkout'; exit 1; }
+        mv .paired-ax ../ax
+        test -f ../ax/pkg/apis/v1alpha1/execution.proto
+        test -f ../ax/cmd/ax-sandbox-guest/main.go

@@ -23,7 +23,7 @@ type expirationStore interface {
 // PostgreSQL admission and execution claims fence concurrent API requests.
 type ExpirationWorker struct {
 	store        expirationStore
-	workflow     *ActorWorkflow
+	workflow     *TaskWorkflow
 	idleTTL      time.Duration
 	pollInterval time.Duration
 	deleted      metric.Int64Counter
@@ -33,7 +33,7 @@ var _ manager.Runnable = (*ExpirationWorker)(nil)
 var _ manager.LeaderElectionRunnable = (*ExpirationWorker)(nil)
 var _ expirationStore = (*database.Client)(nil)
 
-func NewExpirationWorker(store expirationStore, workflow *ActorWorkflow, idleTTL, pollInterval time.Duration) (*ExpirationWorker, error) {
+func NewExpirationWorker(store expirationStore, workflow *TaskWorkflow, idleTTL, pollInterval time.Duration) (*ExpirationWorker, error) {
 	if idleTTL < 0 {
 		return nil, fmt.Errorf("session idle TTL must be nonnegative")
 	}

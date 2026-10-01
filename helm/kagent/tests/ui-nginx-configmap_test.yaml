@@ -15,7 +15,7 @@ tests:
     asserts:
       - matchRegex:
           path: data["nginx.conf"]
-          pattern: 'location = /mcp \{\s+proxy_pass http://kagent_backend/mcp;'
+          pattern: 'location = /mcp \{\s+proxy_pass https://kagent_backend/mcp;'
 
   - it: strips internal agent identity headers in trusted proxy mode even if opted in
     set:
@@ -152,7 +152,7 @@ tests:
     asserts:
       - matchRegex:
           path: data["nginx.conf"]
-          pattern: 'proxy_pass http://kagent_backend/a2a/;'
+          pattern: 'proxy_pass https://kagent_backend/a2a/;'
       - notMatchRegex:
           path: data["nginx.conf"]
           pattern: 'proxy_pass http://kagent_ui'

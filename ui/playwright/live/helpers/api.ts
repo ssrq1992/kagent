@@ -41,5 +41,5 @@ export function liveApi(baseURL: string) {
 
 export interface HarnessSpecShape {
   workload: { image: string };
-  substrate: { workerPoolRef: { name: string }; snapshotPolicy: { location: string } };
+  ax: { taskGroupRef: { name: string }; snapshotLocationOverride?: string };
 }

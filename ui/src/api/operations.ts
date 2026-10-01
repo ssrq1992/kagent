@@ -54,11 +54,6 @@ import type {
 } from "./domain/prompts";
 import type { NamespaceResponse } from "./domain/namespaces";
 import type {
-  SubstrateActorPage,
-  SubstrateSummary,
-  SubstrateWorkerPage,
-} from "./domain/substrate";
-import type {
   AgentInstance,
   AgentInstanceShare,
   AgentInstanceSharePermission,
@@ -85,21 +80,11 @@ export interface AgentInstanceRef {
   id: string;
 }
 
-/** One page in Substrate's native order. */
-export interface SubstratePageInput {
-  /** Requested rows per upstream page; the returned page may be shorter. */
+export interface TaskGroupPageInput {
+  namespace: string;
   limit?: number;
-  /** Opaque upstream token; omitted for the first page. */
   pageToken?: string;
 }
-
-export interface SubstrateScopeInput {
-  namespace?: string;
-  atespace?: string;
-}
-
-export type SubstrateActorPageInput = SubstratePageInput & { atespace?: string };
-export type SubstrateWorkerPageInput = SubstratePageInput & { namespace?: string };
 
 type ScheduledRunRpc<K extends keyof Client<typeof ScheduledRunService>> = {
   input: Parameters<Client<typeof ScheduledRunService>[K]>[0];
@@ -234,9 +219,8 @@ export interface OperationMap {
   /**
    * Removes a saved boundary, and with it the snapshot it was holding.
    *
-   * A checkpoint pins a copy of the conversation's runtime in the substrate — that is
-   * what makes forking one possible — so this is the only thing that gives that space
-   * back. Forks already made from it are unaffected: they own their own copy.
+   * AX retains the runtime snapshot while a Task or unfinished Fork references it.
+   * Deletion reports a precondition error until those references are released.
    */
   "agentInstances.checkpoints.delete": {
     input: { checkpointId: string };
@@ -327,34 +311,11 @@ export interface OperationMap {
   "agentTemplates.delete": { input: ResourceRefInput; output: void };
 
   "namespaces.list": { input: NoInput; output: NamespaceResponse[] };
-  /**
-   * Counts, and the two lists small enough to travel whole.
-   *
-   * The only honest source of a total on the substrate page: every other read
-   * there is a page, and a page counted and presented as a total would report
-   * "20 actors" for a cluster running a hundred thousand.
-   */
-  "substrate.summary": {
-    input: SubstrateScopeInput;
-    output: SubstrateSummary;
+  "taskGroups.list": {
+    input: TaskGroupPageInput;
+    output: import("./domain/taskGroups").TaskGroupPage;
   };
-  /**
-   * One page of actors, ordered and narrowed across the whole inventory.
-   *
-   * ate-api offers paging and nothing else, so the controller reads every one of its
-   * pages to apply the order and the filter before cutting this one. That costs a walk
-   * of the inventory per request, and it is what makes the order and the filter mean
-   * the cluster rather than the hundred rows in front of the reader.
-   */
-  "substrate.actors": {
-    input: SubstrateActorPageInput;
-    output: SubstrateActorPage;
-  };
-  /** One page of worker assignments. The mirror of `substrate.actors`. */
-  "substrate.workers": {
-    input: SubstrateWorkerPageInput;
-    output: SubstrateWorkerPage;
-  };
+
 }
 
 export type OperationId = keyof OperationMap;

@@ -16,7 +16,7 @@ func sandboxFixture(t *testing.T, client *Client, revision string) (*apiv1alpha1
 	t.Helper()
 	ctx := t.Context()
 	require.NoError(t, client.UpsertSandboxTemplateDefinition(ctx, SandboxTemplateDefinition{Namespace: "team-a", SandboxTemplateName: "scratch", SandboxTemplateUID: "uid", DesiredRevision: revision}))
-	require.NoError(t, client.RecordSandboxRevision(ctx, SandboxRevision{RuntimeArtifact: RuntimeArtifact{Revision: revision, Kind: "sandbox", Namespace: "team-a", ActorTemplateAtespace: "team-a", ActorTemplateName: revision, ActorTemplateUID: "actor-uid"},
+	require.NoError(t, client.RecordSandboxRevision(ctx, SandboxRevision{RuntimeArtifact: RuntimeArtifact{Revision: revision, Kind: "sandbox", Namespace: "team-a", PreparedRuntimeAtespace: "team-a", PreparedRuntimeName: revision, PreparedRuntimeUID: "actor-uid"},
 		SandboxTemplateName: "scratch", SandboxTemplateUID: "uid", SourceSnapshot: []byte(`{}`)}, true))
 	hash := sha256.Sum256([]byte("request"))
 	return &apiv1alpha1.Sandbox{Id: uuid.NewString(), Creator: "alice", SandboxTemplate: &apiv1alpha1.ResourceReference{Namespace: "team-a", Name: "scratch"}, Name: "experiment"},

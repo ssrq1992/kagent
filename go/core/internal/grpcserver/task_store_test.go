@@ -15,10 +15,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kagent-dev/kagent/go/core/internal/substrate"
 	kagentenv "github.com/kagent-dev/kagent/go/core/pkg/env"
 	"google.golang.org/protobuf/proto"
 
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/pem"
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2aclient"
 	a2agrpc "github.com/a2aproject/a2a-go/v2/a2agrpc/v1"
@@ -26,10 +28,10 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2apb/v1/pbconv"
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
 	"github.com/a2aproject/a2a-go/v2/a2asrv/limiter"
+	ax "github.com/google/ax/pkg/apis/v1alpha1"
 	"github.com/google/uuid"
 	"github.com/kagent-dev/kagent/go/adk/pkg/controllerclient"
 	runtimetaskstore "github.com/kagent-dev/kagent/go/adk/pkg/taskstore"
-	apia2a "github.com/kagent-dev/kagent/go/api/a2a"
 	apiv1alpha1 "github.com/kagent-dev/kagent/go/api/gen/kagent/api/v1alpha1"
 	"github.com/kagent-dev/kagent/go/core/internal/a2agateway"
 	"github.com/kagent-dev/kagent/go/core/internal/database"
@@ -41,10 +43,14 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
+	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
 )
 
 type lostRuntimeSaveResponse struct {
@@ -121,27 +127,21 @@ func TestRuntimeTaskStoreThroughGRPC(t *testing.T) {
 	store := &lostRuntimeSaveResponse{Client: database.NewClient(db), delayedCreate: make(chan string, 1), releaseCreate: make(chan struct{})}
 	session := createTaskStoreSession(t, store.Client)
 	id := session.Id
-	listener := bufconn.Listen(DefaultMaxMessageSize)
 	tasks := taskstore.NewService(store)
 	server, err := New(Config{
-		Listener: listener, SystemService: testSystemService(),
-		Authenticator: &authimpl.InsecureAuthenticator{}, RuntimeAuthenticator: &taskstore.Authenticator{},
+		SystemService: testSystemService(),
+		Authenticator: &authimpl.InsecureAuthenticator{}, RuntimeAuthenticator: &taskstore.Authenticator{Runtime: &taskStoreIdentityRuntime{sessionID: id}},
 		TaskStoreService: tasks,
 	})
 	require.NoError(t, err)
-	serverCtx, stopServer := context.WithCancel(t.Context())
-	t.Cleanup(stopServer)
-	done := make(chan error, 1)
-	go func() { done <- server.Start(serverCtx) }()
-	t.Cleanup(func() {
-		stopServer()
-		require.NoError(t, <-done)
-	})
-	controller, err := controllerclient.New(controllerclient.Config{
-		APIURL: "http://api.test", DialOptions: []grpc.DialOption{
-			grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return listener.Dial() }),
-		},
-	})
+	secureAPI := httptest.NewUnstartedServer(server.HandlerOr(nil))
+	secureAPI.EnableHTTP2 = true
+	secureAPI.StartTLS()
+	t.Cleanup(secureAPI.Close)
+	roots := x509.NewCertPool()
+	roots.AddCert(secureAPI.Certificate())
+	tlsCredentials := credentials.NewTLS(&tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12})
+	controller, err := controllerclient.New(controllerclient.Config{APIURL: secureAPI.URL, TransportCredentials: tlsCredentials})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, controller.Close()) })
 	private := controller.TaskStoreService()
@@ -151,7 +151,7 @@ func TestRuntimeTaskStoreThroughGRPC(t *testing.T) {
 	forged := metadata.NewOutgoingContext(t.Context(), metadata.Pairs("x-user-id", "alice", "x-agent-name", id))
 	_, err = private.GetTask(forged, read)
 	require.Equal(t, codes.Unauthenticated, status.Code(err))
-	authenticated := metadata.NewOutgoingContext(t.Context(), metadata.Pairs(apia2a.InsecureRuntimeIdentityHeader, "team-a/session-"+id+"/actor-uid"))
+	authenticated := metadata.NewOutgoingContext(t.Context(), metadata.Pairs(ax.RuntimeCredentialHeader, "team-a:"+strings.Repeat("a", 43)))
 	_, err = private.GetTask(authenticated, &apiv1alpha1.TaskStoreServiceGetTaskRequest{SessionId: uuid.NewString(), TaskId: "absent"})
 	require.Equal(t, codes.PermissionDenied, status.Code(err))
 	_, err = private.GetTask(metadata.AppendToOutgoingContext(authenticated, "x-share-token", "share"), read)
@@ -166,7 +166,7 @@ func TestRuntimeTaskStoreThroughGRPC(t *testing.T) {
 		{"wrong atespace", "another-team", "actor-uid", codes.PermissionDenied},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			badIdentity := metadata.NewOutgoingContext(t.Context(), metadata.Pairs(apia2a.InsecureRuntimeIdentityHeader, fmt.Sprintf("%s/session-%s/%s", test.atespace, id, test.actorUID)))
+			badIdentity := metadata.NewOutgoingContext(t.Context(), metadata.Pairs(ax.RuntimeCredentialHeader, test.atespace+":"+strings.Repeat(map[string]string{"actor-uid": "a", "replacement-uid": "b"}[test.actorUID], 43)))
 			_, err = private.GetTask(badIdentity, read)
 			require.Equal(t, test.want, status.Code(err))
 		})
@@ -174,11 +174,26 @@ func TestRuntimeTaskStoreThroughGRPC(t *testing.T) {
 	_, err = private.CreateTask(authenticated, &apiv1alpha1.TaskStoreServiceCreateTaskRequest{SessionId: id, Task: &a2apb.Task{}})
 	require.Equal(t, codes.InvalidArgument, status.Code(err))
 
-	identityPath := filepath.Join(t.TempDir(), "name")
-	require.NoError(t, os.WriteFile(identityPath, []byte("session-"+id), 0o600))
-	require.NoError(t, os.WriteFile(filepath.Join(filepath.Dir(identityPath), "atespace"), []byte("team-a"), 0o600))
-	require.NoError(t, os.WriteFile(filepath.Join(filepath.Dir(identityPath), "uid"), []byte("actor-uid"), 0o600))
-	runtimeStore := runtimetaskstore.New(controller, identityPath)
+	// Model AX's credential injection on a real HTTPS HTTP/2 proxy. Its compute
+	// and MITM installation remain separately gated by cluster acceptance.
+	upstream, _ := url.Parse(secureAPI.URL)
+	proxy := httputil.NewSingleHostReverseProxy(upstream)
+	proxy.Transport = &http.Transport{TLSClientConfig: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}, ForceAttemptHTTP2: true}
+	director := proxy.Director
+	proxy.Director = func(r *http.Request) {
+		director(r)
+		r.Header.Set(ax.RuntimeCredentialHeader, "team-a:"+strings.Repeat("a", 43))
+	}
+	runtimeAPI := httptest.NewUnstartedServer(proxy)
+	runtimeAPI.EnableHTTP2 = true
+	runtimeAPI.StartTLS()
+	t.Cleanup(runtimeAPI.Close)
+	roots.AddCert(runtimeAPI.Certificate())
+	runtimeClient, err := controllerclient.New(controllerclient.Config{APIURL: runtimeAPI.URL, TransportCredentials: credentials.NewTLS(&tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12})})
+	require.NoError(t, err)
+	t.Cleanup(func() { runtimeClient.Close() })
+	runtimeStore := runtimetaskstore.New(runtimeClient)
+
 	release := make(chan struct{})
 	var executions atomic.Int32
 	executor := a2asrv.AgentExecutorFunc(func(ctx context.Context, exec *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
@@ -453,10 +468,8 @@ func TestRuntimeTaskStoreThroughGRPC(t *testing.T) {
 			// Run the Python adapter against this same API and PostgreSQL session.
 			// Only native work is a controlled fixture. Enable with the repository
 			// venv's interpreter.
-			listener, err := net.Listen("tcp", "127.0.0.1:0")
-			require.NoError(t, err)
-			go func() { _ = server.server.Serve(listener) }()
-			t.Cleanup(func() { _ = listener.Close() })
+			certFile := filepath.Join(t.TempDir(), "ca.pem")
+			require.NoError(t, os.WriteFile(certFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: runtimeAPI.Certificate().Raw}), 0600))
 			root, err := filepath.Abs("../../../..")
 			require.NoError(t, err)
 			paths, err := filepath.Glob(filepath.Join(root, "python/packages/*/src"))
@@ -468,8 +481,8 @@ func TestRuntimeTaskStoreThroughGRPC(t *testing.T) {
 			command := exec.CommandContext(ctx, python, filepath.Join(root, "python/packages/kagent-core/tests/task_store_postgres_probe.py"))
 			command.Env = append(os.Environ(),
 				"PYTHONPATH="+strings.Join(paths, string(os.PathListSeparator)),
-				"KAGENT_TASKSTORE_TEST_ENDPOINT="+listener.Addr().String(),
-				"KAGENT_TASKSTORE_TEST_IDENTITY="+identityPath,
+				"KAGENT_TASKSTORE_TEST_ENDPOINT="+strings.TrimPrefix(runtimeAPI.URL, "https://"),
+				"KAGENT_TASKSTORE_TEST_CA="+certFile,
 				"KAGENT_TASKSTORE_TEST_CONTEXT="+session.ContextId,
 			)
 			output, err := command.CombinedOutput()
@@ -510,7 +523,7 @@ func createTaskStoreSession(t *testing.T, store *database.Client) *apiv1alpha1.S
 		Revision: "revision-1", Namespace: "team-a", AgentName: "assistant", AgentUID: "template-uid",
 		SourceSnapshot: []byte("{}"),
 		AgentCard:      &a2apb.AgentCard{Name: "assistant"}, EgressDestinations: []string{},
-		ActorTemplateAtespace: "team-a", ActorTemplateName: "assistant-kagent-revision", ActorTemplateUID: "actor-template-uid",
+		PreparedRuntimeAtespace: "team-a", PreparedRuntimeName: "assistant-kagent-revision", PreparedRuntimeUID: "actor-template-uid",
 	}
 	require.NoError(t, store.UpsertAgentDefinition(t.Context(), database.AgentDefinition{
 		Namespace: revision.Namespace, AgentName: revision.AgentName, AgentUID: revision.AgentUID,
@@ -530,7 +543,22 @@ func createTaskStoreSession(t *testing.T, store *database.Client) *apiv1alpha1.S
 	require.NoError(t, err)
 	require.True(t, claimed)
 	session, err = store.FinishSessionOperation(t.Context(), session.Id, operation.ID, executor,
-		substrate.ActorHost("team-a", substrate.ActorName(session.Id), ""), "actor-uid", "")
+		"actor-uid", "actor-uid", "")
 	require.NoError(t, err)
 	return session
+}
+
+type taskStoreIdentityRuntime struct {
+	ax.AXClient
+	sessionID string
+}
+
+func (r *taskStoreIdentityRuntime) AuthenticateRuntime(_ context.Context, req *ax.AuthenticateRuntimeRequest, _ ...grpc.CallOption) (*ax.AuthenticateRuntimeResponse, error) {
+	uid := "actor-uid"
+	if strings.HasSuffix(req.Credential, strings.Repeat("b", 43)) {
+		uid = "replacement-uid"
+	} else if !strings.HasSuffix(req.Credential, strings.Repeat("a", 43)) {
+		return nil, status.Error(codes.Unauthenticated, "unknown credential")
+	}
+	return &ax.AuthenticateRuntimeResponse{TaskRef: &ax.ResourceRef{Atespace: req.Atespace, Name: "session-" + r.sessionID, Uid: uid}, Scopes: []string{"taskstore"}}, nil
 }

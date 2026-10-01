@@ -21,7 +21,7 @@ export type {
   AgentInstancesApi,
   NamespacesApi,
   PromptsApi,
-  SubstrateApi,
+  TaskGroupsApi,
   ReadOptions,
 } from "./client";
 
@@ -35,10 +35,6 @@ export type {
   OperationInput,
   OperationMap,
   OperationOutput,
-  SubstratePageInput,
-  SubstrateActorPageInput,
-  SubstrateWorkerPageInput,
-  SubstrateScopeInput,
 } from "./operations";
 
 export {
@@ -67,7 +63,7 @@ export * from "./domain/common";
 export * from "./domain/mcpServers";
 export * from "./domain/models";
 export * from "./domain/namespaces";
-export * from "./domain/substrate";
+export * from "./domain/taskGroups";
 export * from "./domain/prompts";
 export * from "./domain/harnesses";
 export * from "./domain/agentTemplates";
@@ -83,11 +79,7 @@ export {
 } from "./hooks/useModels";
 export { usePrompt, usePrompts } from "./hooks/usePrompts";
 export { useNamespaces } from "./hooks/useNamespaces";
-export {
-  useSubstrateActors,
-  useSubstrateSummary,
-  useSubstrateWorkers,
-} from "./hooks/useSubstrate";
+export { useTaskGroups } from "./hooks/useTaskGroups";
 export {
   useAgentTemplate,
   useAgentTemplates,

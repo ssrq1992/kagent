@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"buf.build/go/protovalidate"
-	guestpb "github.com/agent-substrate/env/proto/ateenv/v1alpha"
+	guestpb "github.com/google/ax/pkg/apis/v1alpha1"
 	apiv1alpha1 "github.com/kagent-dev/kagent/go/api/gen/kagent/api/v1alpha1"
 	"github.com/kagent-dev/kagent/go/api/v1alpha3"
 	"github.com/kagent-dev/kagent/go/core/internal/service/kubecrud"
@@ -215,6 +215,17 @@ func registerSandboxTools(server *mcp.Server, service *sandbox.Service, template
 		var stdout, stderr []byte
 		limit := errors.New("output limit reached")
 		err := service.StreamProcessOutputs(ctx, in.SandboxID, request, func(chunk *guestpb.OutputChunk) error {
+			if chunk.Exit != nil {
+				if chunk.Exit.ProcessId != in.ProcessID || len(chunk.Data) != 0 || chunk.Source != guestpb.OutputSource_OUTPUT_SOURCE_UNSPECIFIED {
+					return fmt.Errorf("invalid AX process exit event")
+				}
+				switch chunk.Exit.Status {
+				case guestpb.ProcessStatus_PROCESS_STATUS_COMPLETED, guestpb.ProcessStatus_PROCESS_STATUS_FAILED, guestpb.ProcessStatus_PROCESS_STATUS_TERMINATED:
+					return nil // get_sandbox_process remains the tool's status endpoint.
+				default:
+					return fmt.Errorf("invalid AX terminal process status %s", chunk.Exit.Status)
+				}
+			}
 			data := chunk.Data
 			if remaining := sandboxToolBytes - len(stdout) - len(stderr); len(data) > remaining {
 				data = data[:remaining]

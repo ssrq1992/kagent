@@ -89,9 +89,9 @@ func testHarness(namespace, name, workerPool string) *v1alpha3.Harness {
 		Spec: v1alpha3.HarnessSpec{
 			Codex:    &v1alpha3.CodexHarness{},
 			Workload: v1alpha3.HarnessWorkload{Image: testHarnessImage},
-			Substrate: v1alpha3.RuntimeSubstratePolicy{
-				WorkerPoolRef:  corev1.LocalObjectReference{Name: workerPool},
-				SnapshotPolicy: v1alpha3.RuntimeSnapshotPolicy{Location: "s3://snapshots"},
+			AX: v1alpha3.RuntimeAXPolicy{
+				TaskGroupRef:             corev1.LocalObjectReference{Name: workerPool},
+				SnapshotLocationOverride: "s3://snapshots",
 			},
 		},
 	}

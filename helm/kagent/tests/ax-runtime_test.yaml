@@ -1,0 +1,50 @@
+suite: AX runtime deployment boundary
+templates:
+  - controller-configmap.yaml
+  - controller-deployment.yaml
+  - postgresql-secret.yaml
+  - ui-nginx-configmap.yaml
+  - rbac/getter-role.yaml
+tests:
+  - it: configures AX mutual TLS and HTTPS callbacks
+    template: controller-configmap.yaml
+    asserts:
+      - isSubset:
+          path: data
+          content:
+            KAGENT_AX_ENDPOINT: dns:///ax-server.ax-system.svc:8443
+            KAGENT_AX_CA_FILE: /run/ax-ca/ca.crt
+            KAGENT_AX_CLIENT_CERT_FILE: /run/ax-client/tls.crt
+            KAGENT_AX_CLIENT_KEY_FILE: /run/ax-client/tls.key
+            KAGENT_API_TLS_CERT_FILE: /run/api-tls/tls.crt
+            KAGENT_API_TLS_KEY_FILE: /run/api-tls/tls.key
+      - notExists:
+          path: data.KAGENT_SUBSTRATE_ATE_API_ENDPOINT
+  - it: verifies HTTPS from the UI proxy
+    template: ui-nginx-configmap.yaml
+    asserts:
+      - matchRegex:
+          path: data["nginx.conf"]
+          pattern: 'proxy_ssl_verify on;'
+      - matchRegex:
+          path: data["nginx.conf"]
+          pattern: 'proxy_pass https://kagent_backend/api/;'
+  - it: rejects unconverted legacy values
+    template: controller-deployment.yaml
+    set:
+      controller.substrate.enabled: true
+    asserts:
+      - failedTemplate:
+          errorMessage: 'Legacy runtime values require AX configuration conversion; kagent no longer installs backend capacity.'
+  - it: mounts separate public trust and private credentials
+    template: controller-deployment.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.volumes
+          content: {name: ax-ca, secret: {secretName: ax-server-ca}}
+      - contains:
+          path: spec.template.spec.volumes
+          content: {name: ax-client, secret: {secretName: kagent-ax-client}}
+      - equal:
+          path: spec.template.spec.containers[0].readinessProbe.httpGet.scheme
+          value: HTTPS

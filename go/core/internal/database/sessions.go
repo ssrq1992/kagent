@@ -152,7 +152,7 @@ func (c *Client) GetSessionForRuntime(ctx context.Context, id, actorUID string) 
 	row, err := queryOne(ctx, c.db, `
 		SELECT id, user_id, prepared_revision, state, data, operation, context_id,
 		    source_checkpoint_id, history_id, operation_id, executor_id
-		FROM session_record WHERE id = $1 AND actor_uid = $2
+		FROM session_record WHERE id = $1 AND task_uid = $2
 		    AND state <> 'RUNTIME_STATE_DELETED'
 	`, pgx.RowToStructByName[sessionRow], id, actorUID)
 	if err != nil {

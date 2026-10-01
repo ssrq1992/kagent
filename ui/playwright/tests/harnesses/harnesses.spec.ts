@@ -27,8 +27,8 @@ import {
  * ## Why the form is short
  *
  * The CRD is strict, and the constraints the form enforces are the cluster's rather than
- * this page's: exactly one runtime adapter, an image pinned by digest, and a worker pool
- * for the Substrate Actors to be scheduled onto. A form that accepted a tag would build a
+ * this page's: exactly one runtime adapter, an image pinned by digest, and an AX TaskGroup
+ * for runtime capacity. A form that accepted a tag would build a
  * resource the cluster rejects — the failure that is invisible until somebody tries it
  * for real, which is why the fixture refuses it too.
  */
@@ -91,10 +91,9 @@ test("harnesses: a harness is created, read and deleted", async ({ page }) => {
         "Name",
         "Runtime adapter",
         "Workload image",
-        "Worker pool",
-        "Snapshot location",
+        "TaskGroup",
       ],
-      unmarked: [],
+      unmarked: ["Snapshot location override"],
     });
   });
 
@@ -103,7 +102,7 @@ test("harnesses: a harness is created, read and deleted", async ({ page }) => {
     // lives.
     await selectFirstOption(page, "harness-namespace");
     await page.getByTestId("harness-name").fill(CREATED);
-    await page.getByTestId("harness-worker-pool").fill("kagent-default");
+    await selectFirstOption(page, "harness-task-group");
 
     await page.getByTestId("harness-image").fill("ghcr.io/example/runtime:latest");
     await expect(
@@ -112,14 +111,11 @@ test("harnesses: a harness is created, read and deleted", async ({ page }) => {
     ).toBeDisabled();
   });
 
-  await test.step("6. nor can one with no snapshot location", async () => {
-    // The CRD requires it. This form used to treat it as optional, so a harness could be
-    // submitted without one and the controller answered "Invalid Harness" — naming
-    // neither the field nor what was wrong with it.
+  await test.step("6. the TaskGroup supplies the default snapshot location", async () => {
     await page
       .getByTestId("harness-image")
       .fill(`ghcr.io/example/runtime@sha256:${"a".repeat(64)}`);
-    await expect(page.getByTestId("harness-create")).toBeDisabled();
+    await expect(page.getByTestId("harness-create")).toBeEnabled();
   });
 
   await test.step("7. pinned by digest and told where snapshots go, it is created", async () => {

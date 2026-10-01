@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
-	guestpb "github.com/agent-substrate/env/proto/ateenv/v1alpha"
+	guestpb "github.com/google/ax/pkg/apis/v1alpha1"
 	"github.com/google/uuid"
 	apiv1alpha1 "github.com/kagent-dev/kagent/go/api/gen/kagent/api/v1alpha1"
 	sandboxapi "github.com/kagent-dev/kagent/go/api/sandbox"
@@ -20,7 +20,6 @@ import (
 	"github.com/kagent-dev/kagent/go/core/internal/service/checkpoint"
 	"github.com/kagent-dev/kagent/go/core/internal/service/session"
 	"github.com/kagent-dev/kagent/go/core/internal/service/system"
-	"github.com/kagent-dev/kagent/go/core/internal/substrate"
 	"github.com/kagent-dev/kagent/go/core/pkg/auth"
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/require"
@@ -33,7 +32,7 @@ import (
 )
 
 func TestSandboxTransports(t *testing.T) {
-	service, _, actors, headers := guestFixture(t)
+	service, _, actors := guestFixture(t)
 	listener := bufconn.Listen(1 << 20)
 	server, err := grpcserver.New(grpcserver.Config{
 		Listener: listener, Authenticator: testAuth{},
@@ -58,14 +57,14 @@ func TestSandboxTransports(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, conn.Close()) })
 	client := apiv1alpha1.NewSandboxServiceClient(conn)
-	processes := guestpb.NewProcessServiceClient(conn)
-	files := guestpb.NewFileSystemServiceClient(conn)
+	processes := guestpb.NewTaskExecutionServiceClient(conn)
+	files := guestpb.NewTaskExecutionServiceClient(conn)
 	ctx := metadata.NewOutgoingContext(t.Context(), metadata.Pairs("x-user-id", "alice", "ate-target-actor", "other/victim"))
 	created, err := client.CreateSandbox(ctx, createRequest())
 	require.NoError(t, err)
 	id := created.Sandbox.Id
 	ctx = metadata.AppendToOutgoingContext(ctx, sandboxapi.IDHeader, id)
-	require.Equal(t, []string{"create", "policy", "resume"}, actors.observedCalls())
+	require.Equal(t, []string{"create", "resume"}, actors.observedCalls())
 	writer, err := files.WriteFile(ctx)
 	require.NoError(t, err)
 	require.NoError(t, writer.Send(&guestpb.WriteFileRequest{Path: "grpc.bin", Mode: 0o600, Chunk: []byte{0}}))
@@ -85,8 +84,6 @@ func TestSandboxTransports(t *testing.T) {
 		contents = append(contents, chunk.Data...)
 	}
 	require.Equal(t, []byte{0, 128, 255}, contents)
-	require.Equal(t, "team-a/"+substrate.ActorName(id), headers().Get("ate-target-actor"))
-	require.Equal(t, "alice", headers().Get("x-user-id"))
 	started, err := processes.StartProcess(ctx, &guestpb.StartProcessRequest{Command: []string{"sh", "-c", "printf grpc"}})
 	require.NoError(t, err)
 	outputs, err := processes.StreamProcessOutputs(ctx, &guestpb.StreamProcessOutputsRequest{ProcessId: started.ProcessId, Follow: true})
@@ -229,7 +226,7 @@ func TestSandboxTransports(t *testing.T) {
 	require.Equal(t, "mcp", string(output))
 	_, err = processes.GetProcess(ctx, &guestpb.GetProcessRequest{ProcessId: "unknown-guest-process"})
 	require.Equal(t, codes.NotFound, status.Code(err))
-	require.Equal(t, []string{"create", "policy", "resume"}, actors.observedCalls(), "guest traffic must never call the Substrate control-plane client")
+	require.Equal(t, []string{"create", "resume"}, actors.observedCalls(), "guest traffic must never call the AX lifecycle client")
 	actors.mu.Lock()
 	actors.mutationErr = status.Error(codes.Unavailable, "suspend response lost after effect")
 	actors.mu.Unlock()
@@ -249,5 +246,5 @@ func TestSandboxTransports(t *testing.T) {
 	require.NoError(t, err)
 	_, err = client.DeleteSandbox(ctx, &apiv1alpha1.DeleteSandboxRequest{SandboxId: id})
 	require.NoError(t, err)
-	require.Equal(t, []string{"create", "policy", "resume", "suspend", "suspend", "resume", "suspend", "delete"}, actors.observedCalls())
+	require.Equal(t, []string{"create", "resume", "suspend", "suspend", "resume", "delete"}, actors.observedCalls())
 }

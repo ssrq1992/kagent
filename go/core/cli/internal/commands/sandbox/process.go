@@ -7,7 +7,7 @@ import (
 	"io"
 	"time"
 
-	guestpb "github.com/agent-substrate/env/proto/ateenv/v1alpha"
+	guestpb "github.com/google/ax/pkg/apis/v1alpha1"
 	"github.com/kagent-dev/kagent/go/api/client"
 	"github.com/kagent-dev/kagent/go/core/cli/internal/connection"
 	clioutput "github.com/kagent-dev/kagent/go/core/cli/internal/output"
@@ -171,6 +171,18 @@ func waitProcess(ctx context.Context, cmd *cobra.Command, c *client.SandboxClien
 			return fmt.Errorf("unknown process status %s", process.Status)
 		}
 		err = c.ReadProcessOutputs(ctx, event.SandboxID, &guestpb.StreamProcessOutputsRequest{ProcessId: event.ProcessID, StdoutOffset: event.StdoutOffset, StderrOffset: event.StderrOffset}, func(chunk *guestpb.OutputChunk) error {
+			if chunk.Exit != nil {
+				if chunk.Exit.ProcessId != event.ProcessID || len(chunk.Data) != 0 || chunk.Source != guestpb.OutputSource_OUTPUT_SOURCE_UNSPECIFIED {
+					return fmt.Errorf("invalid AX process exit event")
+				}
+				switch chunk.Exit.Status {
+				case guestpb.ProcessStatus_PROCESS_STATUS_COMPLETED, guestpb.ProcessStatus_PROCESS_STATUS_FAILED, guestpb.ProcessStatus_PROCESS_STATUS_TERMINATED:
+					process = chunk.Exit
+					return nil
+				default:
+					return fmt.Errorf("invalid AX terminal process status %s", chunk.Exit.Status)
+				}
+			}
 			next := event
 			next.Event, next.Source, next.Data = "output", chunk.Source.String(), chunk.Data
 			switch chunk.Source {

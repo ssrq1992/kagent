@@ -250,14 +250,14 @@ func TestConfigurationCRDValidation(t *testing.T) {
 			wantReject: "spec.workload.image",
 		},
 		{
-			name:       "SandboxTemplate requires a worker pool",
-			object:     sandboxTemplateForValidation(namespace, "sandbox-empty-pool", func(spec *SandboxTemplateSpec) { spec.Substrate.WorkerPoolRef.Name = "" }),
-			wantReject: "workerPoolRef name must not be empty",
+			name:       "SandboxTemplate requires a TaskGroup",
+			object:     sandboxTemplateForValidation(namespace, "sandbox-empty-pool", func(spec *SandboxTemplateSpec) { spec.AX.TaskGroupRef.Name = "" }),
+			wantReject: "taskGroupRef name must not be empty",
 		},
 		{
 			name:       "SandboxTemplate rejects whitespace in snapshot location",
-			object:     sandboxTemplateForValidation(namespace, "sandbox-invalid-location", func(spec *SandboxTemplateSpec) { spec.Substrate.SnapshotPolicy.Location = "bad location" }),
-			wantReject: "spec.substrate.snapshotPolicy.location",
+			object:     sandboxTemplateForValidation(namespace, "sandbox-invalid-location", func(spec *SandboxTemplateSpec) { spec.AX.SnapshotLocationOverride = "bad location" }),
+			wantReject: "spec.ax.snapshotLocationOverride",
 		},
 		{
 			name:   "SandboxTemplate allows empty literal environment values",
@@ -397,8 +397,8 @@ func TestConfigurationCRDValidation(t *testing.T) {
 
 func sandboxTemplateForValidation(namespace, name string, mutate func(*SandboxTemplateSpec)) *SandboxTemplate {
 	spec := SandboxTemplateSpec{
-		Workload:  SandboxTemplateWorkload{Image: "registry.example.com/guest@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
-		Substrate: RuntimeSubstratePolicy{WorkerPoolRef: corev1.LocalObjectReference{Name: "default"}, SnapshotPolicy: RuntimeSnapshotPolicy{Location: "s3://snapshots"}},
+		Workload: SandboxTemplateWorkload{Image: "registry.example.com/guest@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+		AX:       RuntimeAXPolicy{TaskGroupRef: corev1.LocalObjectReference{Name: "default"}, SnapshotLocationOverride: "s3://snapshots"},
 	}
 	if mutate != nil {
 		mutate(&spec)
@@ -410,11 +410,11 @@ func validHarness(namespace, name string, overrides HarnessSpec) *Harness {
 	if overrides.Workload.Image == "" {
 		overrides.Workload.Image = "registry.example.com/kagent@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	}
-	if overrides.Substrate.WorkerPoolRef.Name == "" {
-		overrides.Substrate.WorkerPoolRef.Name = "default"
+	if overrides.AX.TaskGroupRef.Name == "" {
+		overrides.AX.TaskGroupRef.Name = "default"
 	}
-	if overrides.Substrate.SnapshotPolicy.Location == "" {
-		overrides.Substrate.SnapshotPolicy.Location = "gs://snapshots/kagent"
+	if overrides.AX.SnapshotLocationOverride == "" {
+		overrides.AX.SnapshotLocationOverride = "gs://snapshots/kagent"
 	}
 	return &Harness{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace}, Spec: overrides}
 }

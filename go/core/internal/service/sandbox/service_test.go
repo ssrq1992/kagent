@@ -8,15 +8,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
+	ax "github.com/google/ax/pkg/apis/v1alpha1"
 	"github.com/jackc/pgx/v5/pgxpool"
 	apiv1alpha1 "github.com/kagent-dev/kagent/go/api/gen/kagent/api/v1alpha1"
 	"github.com/kagent-dev/kagent/go/api/v1alpha3"
 	"github.com/kagent-dev/kagent/go/core/internal/database"
 	"github.com/kagent-dev/kagent/go/core/internal/dbtest"
-	"github.com/kagent-dev/kagent/go/core/internal/substrate"
 	"github.com/kagent-dev/kagent/go/core/pkg/auth"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
@@ -32,18 +32,20 @@ func (s testSession) Principal() auth.Principal {
 }
 
 type testActors struct {
-	substrate.LifecycleClient
-	mu             sync.Mutex
-	actor          *ateapipb.Actor
-	egressPolicy   *ateapipb.EgressPolicy
-	calls          []string
-	readErr        error
-	mutationErr    error
-	suspendStarted chan struct{}
-	suspendRelease <-chan struct{}
+	ax.AXClient
+	mu                   sync.Mutex
+	actor                *ax.Task
+	calls                []string
+	readErr, errorUnused error
+	mutationErr          error
+	suspendStarted       chan struct{}
+	suspendRelease       <-chan struct{}
 }
 
-func (a *testActors) GetActor(context.Context, string, string) (*ateapipb.Actor, error) {
+func (a *testActors) GetPreparedRuntime(_ context.Context, req *ax.GetPreparedRuntimeRequest, _ ...grpc.CallOption) (*ax.PreparedRuntime, error) {
+	return &ax.PreparedRuntime{Metadata: &ax.ObjectMeta{Atespace: req.Ref.Atespace, Name: req.Ref.Name, Uid: req.Ref.Uid}, Phase: "Ready", Spec: &ax.PreparedRuntimeSpec{Kind: "Sandbox", GroupRef: &ax.ResourceRef{Atespace: req.Ref.Atespace, Name: "group", Uid: "group-uid"}}}, nil
+}
+func (a *testActors) GetTask(context.Context, *ax.GetTaskRequest, ...grpc.CallOption) (*ax.Task, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.readErr != nil {
@@ -54,30 +56,27 @@ func (a *testActors) GetActor(context.Context, string, string) (*ateapipb.Actor,
 	}
 	return proto.CloneOf(a.actor), nil
 }
-func (a *testActors) CreateActor(_ context.Context, space, name, templateSpace, templateName string) (*ateapipb.Actor, error) {
+func (a *testActors) CreateTask(_ context.Context, req *ax.CreateTaskRequest, _ ...grpc.CallOption) (*ax.Task, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.actor != nil {
+		return proto.CloneOf(a.actor), nil
+	}
 	a.calls = append(a.calls, "create")
-	a.actor = &ateapipb.Actor{Metadata: &ateapipb.ResourceMetadata{Atespace: space, Name: name, Uid: "uid"},
-		ActorTemplate: &ateapipb.ObjectRef{Atespace: templateSpace, Name: templateName},
-		Status:        &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_SUSPENDED}}
+	a.actor = proto.CloneOf(req.Task)
+	a.actor.Metadata.Uid = "task-uid"
+	a.actor.Status = &ax.TaskStatus{RuntimeStatus: &ax.TaskRuntimeStatus{Phase: "Suspended", LastOperationId: req.RequestId}}
 	return proto.CloneOf(a.actor), a.mutationErr
 }
-func (a *testActors) EnsureActorEgressPolicy(_ context.Context, _, _ string, policy *ateapipb.EgressPolicy) error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.calls = append(a.calls, "policy")
-	a.egressPolicy = proto.CloneOf(policy)
-	return a.mutationErr
-}
-func (a *testActors) ResumeActor(context.Context, string, string) (*ateapipb.Actor, error) {
+func (a *testActors) ResumeTask(_ context.Context, req *ax.ResumeTaskRequest, _ ...grpc.CallOption) (*ax.Task, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.calls = append(a.calls, "resume")
-	a.actor.Status.State = ateapipb.ActorState_ACTOR_STATE_RUNNING
+	a.actor.Status.RuntimeStatus.Phase = "Running"
+	a.actor.Status.RuntimeStatus.LastOperationId = req.OperationId
 	return proto.CloneOf(a.actor), a.mutationErr
 }
-func (a *testActors) SuspendActor(context.Context, string, string) (*ateapipb.Actor, error) {
+func (a *testActors) SuspendTask(_ context.Context, req *ax.SuspendTaskRequest, _ ...grpc.CallOption) (*ax.Task, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.suspendStarted != nil {
@@ -86,17 +85,17 @@ func (a *testActors) SuspendActor(context.Context, string, string) (*ateapipb.Ac
 		<-a.suspendRelease
 	}
 	a.calls = append(a.calls, "suspend")
-	a.actor.Status.State = ateapipb.ActorState_ACTOR_STATE_SUSPENDED
+	a.actor.Status.RuntimeStatus.Phase = "Suspended"
+	a.actor.Status.RuntimeStatus.LastOperationId = req.OperationId
 	return proto.CloneOf(a.actor), a.mutationErr
 }
-func (a *testActors) DeleteActor(context.Context, string, string) error {
+func (a *testActors) DeleteTask(context.Context, *ax.DeleteTaskRequest, ...grpc.CallOption) (*ax.DeleteTaskResponse, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.calls = append(a.calls, "delete")
 	a.actor = nil
-	return a.mutationErr
+	return &ax.DeleteTaskResponse{}, a.mutationErr
 }
-
 func (a *testActors) observedCalls() []string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -125,7 +124,7 @@ func serviceFixture(t *testing.T) (*Service, context.Context, *testActors) {
 	store := database.NewClient(pool)
 	require.NoError(t, store.UpsertSandboxTemplateDefinition(ctx, database.SandboxTemplateDefinition{Namespace: "team-a", SandboxTemplateName: "scratch", SandboxTemplateUID: "template-uid", DesiredRevision: "revision"}))
 	require.NoError(t, store.RecordSandboxRevision(ctx, database.SandboxRevision{
-		RuntimeArtifact:     database.RuntimeArtifact{Revision: "revision", Kind: "sandbox", Namespace: "team-a", ActorTemplateAtespace: "team-a", ActorTemplateName: "revision", ActorTemplateUID: "revision-uid"},
+		RuntimeArtifact:     database.RuntimeArtifact{Revision: "revision", Kind: "sandbox", Namespace: "team-a", PreparedRuntimeAtespace: "team-a", PreparedRuntimeName: "revision", PreparedRuntimeUID: "revision-uid"},
 		SandboxTemplateName: "scratch", SandboxTemplateUID: "template-uid", SourceSnapshot: []byte("{}"),
 	}, true))
 	scheme := runtime.NewScheme()
@@ -134,7 +133,7 @@ func serviceFixture(t *testing.T) (*Service, context.Context, *testActors) {
 		ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "scratch", UID: "template-uid"},
 	}).Build()
 	actors := &testActors{}
-	service, err := NewService(Config{Store: store, Kube: kube, Authorizer: auth.NoopAuthorizer{}, Actors: actors,
+	service, err := NewService(Config{Store: store, Kube: kube, Authorizer: auth.NoopAuthorizer{}, Runtime: actors,
 		DefaultTTL: time.Hour, MaxTTL: 24 * time.Hour})
 	require.NoError(t, err)
 	return service, auth.AuthSessionTo(t.Context(), testSession("alice")), actors
@@ -203,9 +202,8 @@ func TestSandboxLifecycleClientRetriesAfterRestart(t *testing.T) {
 					count++
 				}
 			}
-			require.Equal(t, 1, count, "retry must preserve the original Actor and files")
-			require.NotNil(t, actors.egressPolicy)
-			require.Empty(t, actors.egressPolicy.Rules)
+			require.Equal(t, 1, count, "retry must preserve the original Task and files")
+
 		})
 	}
 }
@@ -223,7 +221,7 @@ func TestSandboxPreparationFailureRequiresClientRetry(t *testing.T) {
 	current, err := service.Create(ctx, createRequest())
 	require.NoError(t, err)
 	require.Equal(t, apiv1alpha1.RuntimeState_RUNTIME_STATE_READY, current.State)
-	require.Equal(t, []string{"create", "policy", "resume"}, actors.observedCalls())
+	require.Equal(t, []string{"create", "resume"}, actors.observedCalls())
 }
 
 func TestExpirationCleansUpIncompleteCreation(t *testing.T) {
@@ -264,7 +262,7 @@ func TestSandboxConflictingRequestCanRetryAfterActiveAttempt(t *testing.T) {
 	select {
 	case <-started:
 	case <-time.After(5 * time.Second):
-		t.Fatal("suspend did not reach Substrate")
+		t.Fatal("suspend did not reach AX")
 	}
 	_, err = service.Resume(ctx, instance.Id)
 	require.ErrorIs(t, err, database.ErrConflict)
@@ -274,5 +272,5 @@ func TestSandboxConflictingRequestCanRetryAfterActiveAttempt(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, apiv1alpha1.RuntimeState_RUNTIME_STATE_READY, current.State)
 	require.Equal(t, apiv1alpha1.RuntimeOperation_RUNTIME_OPERATION_NONE, current.Operation)
-	require.Equal(t, []string{"create", "policy", "resume", "suspend", "resume"}, actors.observedCalls())
+	require.Equal(t, []string{"create", "resume", "suspend", "resume"}, actors.observedCalls())
 }

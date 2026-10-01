@@ -2,7 +2,7 @@ package grpcserver
 
 import (
 	a2apb "github.com/a2aproject/a2a-go/v2/a2apb/v1"
-	guestpb "github.com/agent-substrate/env/proto/ateenv/v1alpha"
+	guestpb "github.com/google/ax/pkg/apis/v1alpha1"
 	apiv1alpha1 "github.com/kagent-dev/kagent/go/api/gen/kagent/api/v1alpha1"
 	"github.com/kagent-dev/kagent/go/core/pkg/auth"
 	grpc_health_v1 "google.golang.org/grpc/health/grpc_health_v1"
@@ -12,6 +12,7 @@ type MethodPolicies map[string]auth.AccessMode
 
 func DefaultMethodPolicies() MethodPolicies {
 	policies := MethodPolicies{
+		apiv1alpha1.TaskStoreService_ResolveSession_FullMethodName:            auth.AccessRuntime,
 		apiv1alpha1.TaskStoreService_CreateTask_FullMethodName:                auth.AccessRuntime,
 		apiv1alpha1.TaskStoreService_GetTask_FullMethodName:                   auth.AccessRuntime,
 		apiv1alpha1.TaskStoreService_UpdateTask_FullMethodName:                auth.AccessRuntime,
@@ -19,10 +20,8 @@ func DefaultMethodPolicies() MethodPolicies {
 		apiv1alpha1.TaskStoreService_ListTasks_FullMethodName:                 auth.AccessRuntime,
 		apiv1alpha1.SystemService_GetVersion_FullMethodName:                   auth.AccessPublic,
 		apiv1alpha1.SystemService_GetCurrentUser_FullMethodName:               auth.AccessRead,
+		apiv1alpha1.SystemService_ListTaskGroups_FullMethodName:               auth.AccessRead,
 		apiv1alpha1.SystemService_ListNamespaces_FullMethodName:               auth.AccessRead,
-		apiv1alpha1.SystemService_GetSubstrateSummary_FullMethodName:          auth.AccessRead,
-		apiv1alpha1.SystemService_ListSubstrateActors_FullMethodName:          auth.AccessRead,
-		apiv1alpha1.SystemService_ListSubstrateWorkers_FullMethodName:         auth.AccessRead,
 		apiv1alpha1.MemoryService_AddSession_FullMethodName:                   auth.AccessCreate,
 		apiv1alpha1.MemoryService_AddSessionBatch_FullMethodName:              auth.AccessCreate,
 		apiv1alpha1.MemoryService_Search_FullMethodName:                       auth.AccessRead,
@@ -116,11 +115,11 @@ func DefaultMethodPolicies() MethodPolicies {
 	policies[apiv1alpha1.SandboxService_SuspendSandbox_FullMethodName] = auth.AccessUpdate
 	policies[apiv1alpha1.SandboxService_ResumeSandbox_FullMethodName] = auth.AccessUpdate
 	policies[apiv1alpha1.SandboxService_DeleteSandbox_FullMethodName] = auth.AccessDelete
-	policies[guestpb.ProcessService_StartProcess_FullMethodName] = auth.AccessCreate
-	policies[guestpb.ProcessService_GetProcess_FullMethodName] = auth.AccessRead
-	policies[guestpb.ProcessService_KillProcess_FullMethodName] = auth.AccessUpdate
-	policies[guestpb.ProcessService_StreamProcessOutputs_FullMethodName] = auth.AccessRead
-	policies[guestpb.FileSystemService_ReadFile_FullMethodName] = auth.AccessRead
-	policies[guestpb.FileSystemService_WriteFile_FullMethodName] = auth.AccessUpdate
+	policies[guestpb.TaskExecutionService_StartProcess_FullMethodName] = auth.AccessCreate
+	policies[guestpb.TaskExecutionService_GetProcess_FullMethodName] = auth.AccessRead
+	policies[guestpb.TaskExecutionService_KillProcess_FullMethodName] = auth.AccessUpdate
+	policies[guestpb.TaskExecutionService_StreamProcessOutputs_FullMethodName] = auth.AccessRead
+	policies[guestpb.TaskExecutionService_ReadFile_FullMethodName] = auth.AccessRead
+	policies[guestpb.TaskExecutionService_WriteFile_FullMethodName] = auth.AccessUpdate
 	return policies
 }

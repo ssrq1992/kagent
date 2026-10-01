@@ -46,6 +46,10 @@ jobs:
     - name: 'Checkout GitHub Action'
       uses: actions/checkout@v6
 
+    - uses: ./.github/actions/checkout-ax
+      with:
+        repository: ${{ vars.AX_REPOSITORY }}
+        ref: ${{ vars.AX_REF }}
     - uses: ./.github/actions/publish-image
       with:
         version: ${{ needs.setup.outputs.version }}
@@ -64,6 +68,10 @@ jobs:
     - name: 'Checkout GitHub Action'
       uses: actions/checkout@v6
 
+    - uses: ./.github/actions/checkout-ax
+      with:
+        repository: ${{ vars.AX_REPOSITORY }}
+        ref: ${{ vars.AX_REF }}
     - uses: ./.github/actions/publish-helm
       with:
         version: ${{ needs.setup.outputs.version }}
@@ -80,6 +88,10 @@ jobs:
     steps:
     - name: 'Checkout GitHub Action'
       uses: actions/checkout@v6
+    - uses: ./.github/actions/checkout-ax
+      with:
+        repository: ${{ vars.AX_REPOSITORY }}
+        ref: ${{ vars.AX_REF }}
     - name: Install uv
       uses: astral-sh/setup-uv@v7
     - name: 'Release Python Packages'
@@ -122,6 +134,10 @@ jobs:
     steps:
     - name: Checkout
       uses: actions/checkout@v6
+    - uses: ./.github/actions/checkout-ax
+      with:
+        repository: ${{ vars.AX_REPOSITORY }}
+        ref: ${{ vars.AX_REF }}
     - uses: ./.github/actions/build-release-artifacts
       with:
         version: ${{ needs.setup.outputs.version }}

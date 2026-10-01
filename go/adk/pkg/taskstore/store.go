@@ -5,69 +5,48 @@ package taskstore
 import (
 	"context"
 	"fmt"
-	"os"
-	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2apb/v1/pbconv"
 	sdktaskstore "github.com/a2aproject/a2a-go/v2/a2asrv/taskstore"
-	"github.com/google/uuid"
 	"github.com/kagent-dev/kagent/go/adk/pkg/controllerclient"
-	apia2a "github.com/kagent-dev/kagent/go/api/a2a"
 	apiv1alpha1 "github.com/kagent-dev/kagent/go/api/gen/kagent/api/v1alpha1"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 )
 
-type Store struct {
-	client       *controllerclient.Client
-	identityPath string
-}
+type Store struct{ client *controllerclient.Client }
 
 var _ sdktaskstore.Store = (*Store)(nil)
 
-func New(client *controllerclient.Client, identityPath string) *Store {
-	return &Store{client: client, identityPath: identityPath}
-}
-
-func (s *Store) sessionID() (string, error) {
-	identity, err := os.ReadFile(s.identityPath)
+func New(client *controllerclient.Client) *Store { return &Store{client: client} }
+func (s *Store) sessionID(ctx context.Context) (string, error) {
+	ctx, cancel, err := s.callContext(ctx)
 	if err != nil {
-		return "", fmt.Errorf("read runtime identity: %w", err)
+		return "", err
 	}
-	id, ok := strings.CutPrefix(strings.TrimSpace(string(identity)), "session-")
-	if !ok {
-		return "", fmt.Errorf("unexpected runtime actor name")
+	defer cancel()
+	response, err := s.client.TaskStoreService().ResolveSession(ctx, &apiv1alpha1.TaskStoreServiceResolveSessionRequest{})
+	if err != nil {
+		return "", fmt.Errorf("resolve AX runtime session: %w", err)
 	}
-	if _, err := uuid.Parse(id); err != nil {
-		return "", fmt.Errorf("invalid runtime session identity: %w", err)
+	if response.SessionId == "" {
+		return "", fmt.Errorf("empty runtime session identity")
 	}
-	return id, nil
+	return response.SessionId, nil
 }
-
 func (s *Store) callContext(ctx context.Context) (context.Context, context.CancelFunc, error) {
 	ctx, cancel := s.client.CallContext(ctx, "")
-	md, _ := metadata.FromOutgoingContext(ctx)
-	md = md.Copy()
-	md.Delete("authorization")
-	md.Delete("x-user-id")
-	md.Delete("x-agent-name")
-	md.Delete("x-share-token")
-	// Temporary identity transport until Substrate injects actor credentials (#1660).
-	// Reread on every call because restore rebinds these files to the new actor.
-	var identity []string
-	for _, field := range []string{"atespace", "name", "uid"} {
-		value, err := os.ReadFile(filepath.Join(filepath.Dir(s.identityPath), field))
-		if err != nil {
-			cancel()
-			return nil, nil, fmt.Errorf("read runtime identity %s: %w", field, err)
+	incoming, _ := metadata.FromOutgoingContext(ctx)
+	md := metadata.MD{}
+	for _, key := range []string{"traceparent", "tracestate"} {
+		if values := incoming.Get(key); len(values) > 0 {
+			md.Set(key, values...)
 		}
-		identity = append(identity, strings.TrimSpace(string(value)))
 	}
-	md.Set(apia2a.InsecureRuntimeIdentityHeader, strings.Join(identity, "/"))
+	// AX injects the credential over HTTPS; guest code never reads or sends it.
 	return metadata.NewOutgoingContext(ctx, md), cancel, nil
 }
 
@@ -77,7 +56,7 @@ func (s *Store) Create(ctx context.Context, task *a2a.Task) (sdktaskstore.TaskVe
 	if err != nil {
 		return 0, err
 	}
-	id, err := s.sessionID()
+	id, err := s.sessionID(ctx)
 	if err != nil {
 		return 0, err
 	}
@@ -114,7 +93,7 @@ func (s *Store) Update(ctx context.Context, update *sdktaskstore.UpdateRequest) 
 	if err != nil {
 		return 0, err
 	}
-	id, err := s.sessionID()
+	id, err := s.sessionID(ctx)
 	if err != nil {
 		return 0, err
 	}
@@ -137,7 +116,7 @@ func (s *Store) Update(ctx context.Context, update *sdktaskstore.UpdateRequest) 
 }
 
 func (s *Store) Get(ctx context.Context, taskID a2a.TaskID) (*sdktaskstore.StoredTask, error) {
-	id, err := s.sessionID()
+	id, err := s.sessionID(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -162,7 +141,7 @@ func (s *Store) List(ctx context.Context, request *a2a.ListTasksRequest) (*a2a.L
 	if err != nil {
 		return nil, err
 	}
-	id, err := s.sessionID()
+	id, err := s.sessionID(ctx)
 	if err != nil {
 		return nil, err
 	}

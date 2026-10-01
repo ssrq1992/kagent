@@ -53,7 +53,7 @@ func (c *Compiler) Compile(ctx context.Context, input *v2translator.HarnessInput
 	}
 	environment = append(environment, adkconfig.HarnessEnvironment(harness)...)
 	environment = adkconfig.DedupeEnv(append(environment,
-		corev1.EnvVar{Name: env.KagentAPIURL.Name(), Value: fmt.Sprintf("http://%s.%s:8083", utils.GetControllerName(), utils.GetResourceNamespace())},
+		corev1.EnvVar{Name: env.KagentAPIURL.Name(), Value: fmt.Sprintf("https://%s.%s:8083", utils.GetControllerName(), utils.GetResourceNamespace())},
 	))
 	provenance, err := c.config.BuildProvenance(ctx, harness, compiled.Templates, compiled.Models, environment)
 	if err != nil {
@@ -70,7 +70,7 @@ func (c *Compiler) Compile(ctx context.Context, input *v2translator.HarnessInput
 		Namespace: template.Namespace,
 		Image:     harness.Spec.Workload.Image, Command: harness.Spec.Workload.Command, Args: harness.Spec.Workload.Args,
 		Environment: environment, ConfigJSON: configJSON, AgentCard: card,
-		WorkerPoolName: harness.Spec.Substrate.WorkerPoolRef.Name, SnapshotLocation: harness.Spec.Substrate.SnapshotPolicy.Location,
+		TaskGroupName: harness.Spec.AX.TaskGroupRef.Name, SnapshotLocation: harness.Spec.AX.SnapshotLocationOverride,
 		Credentials: credentials, Provenance: provenance, EgressDestinations: slices.Compact(compiled.Egress),
 	}}, nil
 }

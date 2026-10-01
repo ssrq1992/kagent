@@ -1,7 +1,6 @@
 """Runtime A2A persistence through the session-scoped controller TaskStore."""
 
 import asyncio
-from pathlib import Path
 from typing import AsyncIterator, cast
 from uuid import UUID
 
@@ -22,38 +21,32 @@ _PERSISTED = "kagent.task_store.persisted"
 _NATIVE_SETTLED = "kagent.task_store.native_settled"
 _PRODUCER = "kagent.task_store.producer"
 _FAILED_SAVE = "kagent.task_store.failed_save"
-_IDENTITY_PATH = Path("/run/kagent/identity/name")
 _DISPATCH_HEADER = "x-kagent-dispatch-id"
 
 
 class KAgentTaskStore(TaskStore):
     """Persist SDK tasks over gRPC with request-local optimistic versions."""
 
-    def __init__(self, client: AsyncControllerClient, identity_path: Path = _IDENTITY_PATH) -> None:
+    def __init__(self, client: AsyncControllerClient) -> None:
         self.client = client
-        self.identity_path = identity_path
         self._executions: dict[str, asyncio.Event] = {}
         self._execution_lock = asyncio.Lock()
 
     async def _session_id(self) -> str:
-        name = (await asyncio.to_thread(self.identity_path.read_text)).strip()
-        if not name.startswith("session-"):
-            raise InternalError("unexpected runtime actor name")
-        return str(UUID(name.removeprefix("session-")))
+        response = await self._call(
+            self.client.task_store_service.ResolveSession,
+            task_store_pb2.TaskStoreServiceResolveSessionRequest(),
+        )
+        return str(UUID(response.session_id))
 
     async def _call(self, method, request):
-        # Temporary identity transport until Substrate injects actor credentials (#1660).
-        # Reread on every call because restore rebinds these files to the new actor.
-        identity = []
-        for field in ("atespace", "name", "uid"):
-            identity.append((await asyncio.to_thread((self.identity_path.parent / field).read_text)).strip())
-        metadata = (("x-kagent-insecure-runtime-identity", "/".join(identity)),)
+        # AX injects runtime credentials over HTTPS. Do not cache identity across restore.
         for attempt in range(4):
             try:
                 return await method(
                     request,
                     timeout=self.client.timeout,
-                    metadata=metadata,
+                    metadata=(),
                 )
             except grpc.aio.AioRpcError as error:
                 if error.code() not in (grpc.StatusCode.UNAVAILABLE, grpc.StatusCode.DEADLINE_EXCEEDED) or attempt == 3:
@@ -66,21 +59,21 @@ class KAgentTaskStore(TaskStore):
             # Once a save is uncertain, the SDK must not replace that mutation
             # with a synthetic FAILED update at the same expected version.
             raise InternalError("task persistence failed") from failure
-        versions = self._versions(context)
-        if task.id not in versions:
-            await self.get(task.id, context)
-        version = versions[task.id]
-        # Copy before awaiting: the SDK mutates its cached protobuf task in place.
-        if version == 0:
-            request = task_store_pb2.TaskStoreServiceCreateTaskRequest(task=task)
-            method = self.client.task_store_service.CreateTask
-        else:
-            request = task_store_pb2.TaskStoreServiceUpdateTaskRequest(task=task, expected_version=version)
-            method = self.client.task_store_service.UpdateTask
-        request.session_id = await self._session_id()
-        if dispatch_id := context.state.get("headers", {}).get(_DISPATCH_HEADER):
-            request.dispatch_id = dispatch_id
         try:
+            versions = self._versions(context)
+            if task.id not in versions:
+                await self.get(task.id, context)
+            version = versions[task.id]
+            # Copy before awaiting: the SDK mutates its cached protobuf task in place.
+            if version == 0:
+                request = task_store_pb2.TaskStoreServiceCreateTaskRequest(task=task)
+                method = self.client.task_store_service.CreateTask
+            else:
+                request = task_store_pb2.TaskStoreServiceUpdateTaskRequest(task=task, expected_version=version)
+                method = self.client.task_store_service.UpdateTask
+            request.session_id = await self._session_id()
+            if dispatch_id := context.state.get("headers", {}).get(_DISPATCH_HEADER):
+                request.dispatch_id = dispatch_id
             result = await self._call(method, request)
         except BaseException as failure:
             context.state[_FAILED_SAVE] = failure
@@ -164,8 +157,13 @@ class KAgentRequestHandler(DefaultRequestHandlerV2):
     ) -> AsyncIterator:
         if self.task_store._execution_lock.locked():
             raise UnsupportedOperationError("session already has active work")
-        async for event in super().on_message_send_stream(params, context):
-            yield event
+        try:
+            async for event in super().on_message_send_stream(params, context):
+                yield event
+        except Exception:
+            if failure := context.state.get(_FAILED_SAVE):
+                raise InternalError("task persistence failed") from failure
+            raise
         # The pinned SDK can close subscriptions without propagating a failed
         # save when persisting its fallback FAILED event also fails.
         if failure := context.state.get(_FAILED_SAVE):

@@ -51,6 +51,37 @@ spec:
             description: SandboxTemplateSpec defines standalone sandbox environment
               configuration.
             properties:
+              ax:
+                description: |-
+                  AX configures the TaskGroup and optional snapshot override. References are
+                  resolved in this template's namespace.
+                properties:
+                  snapshotLocationOverride:
+                    description: SnapshotLocationOverride optionally replaces the
+                      TaskGroup storage prefix.
+                    pattern: ^(gs|s3)://[^[:space:]]+$
+                    type: string
+                  taskGroupRef:
+                    description: TaskGroupRef references an administrator-managed
+                      AX TaskGroup.
+                    properties:
+                      name:
+                        default: ""
+                        description: |-
+                          Name of the referent.
+                          This field is effectively required, but due to backwards compatibility is
+                          allowed to be empty. Instances of this type with an empty value here are
+                          almost certainly wrong.
+                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                        type: string
+                    type: object
+                    x-kubernetes-map-type: atomic
+                    x-kubernetes-validations:
+                    - message: taskGroupRef name must not be empty
+                      rule: self.name.size() > 0
+                required:
+                - taskGroupRef
+                type: object
               env:
                 description: |-
                   Env supplies runtime environment defaults.
@@ -103,44 +134,6 @@ spec:
                 x-kubernetes-list-map-keys:
                 - name
                 x-kubernetes-list-type: map
-              substrate:
-                description: |-
-                  Substrate configures compute placement and snapshot storage. References are
-                  resolved in this template's namespace.
-                properties:
-                  snapshotPolicy:
-                    description: SnapshotPolicy configures runtime snapshot storage.
-                    properties:
-                      location:
-                        description: Location is the snapshot storage location used
-                          by Substrate.
-                        pattern: ^[^[:space:]]+$
-                        type: string
-                    required:
-                    - location
-                    type: object
-                  workerPoolRef:
-                    description: WorkerPoolRef references a WorkerPool in the resource's
-                      namespace.
-                    properties:
-                      name:
-                        default: ""
-                        description: |-
-                          Name of the referent.
-                          This field is effectively required, but due to backwards compatibility is
-                          allowed to be empty. Instances of this type with an empty value here are
-                          almost certainly wrong.
-                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
-                        type: string
-                    type: object
-                    x-kubernetes-map-type: atomic
-                required:
-                - snapshotPolicy
-                - workerPoolRef
-                type: object
-                x-kubernetes-validations:
-                - message: workerPoolRef name must not be empty
-                  rule: self.workerPoolRef.name.size() > 0
               workload:
                 description: Workload selects the immutable runtime image.
                 properties:
@@ -153,7 +146,7 @@ spec:
                 - image
                 type: object
             required:
-            - substrate
+            - ax
             - workload
             type: object
           status:

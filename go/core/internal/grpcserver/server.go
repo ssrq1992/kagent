@@ -12,7 +12,7 @@ import (
 	"buf.build/go/protovalidate"
 	a2agrpc "github.com/a2aproject/a2a-go/v2/a2agrpc/v1"
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
-	guestpb "github.com/agent-substrate/env/proto/ateenv/v1alpha"
+	guestpb "github.com/google/ax/pkg/apis/v1alpha1"
 	protovalidatemiddleware "github.com/grpc-ecosystem/go-grpc-middleware/v2/interceptors/protovalidate"
 	apiv1alpha1 "github.com/kagent-dev/kagent/go/api/gen/kagent/api/v1alpha1"
 	"github.com/kagent-dev/kagent/go/api/v1alpha3"
@@ -135,8 +135,7 @@ func New(config Config) (*Server, error) {
 	apiv1alpha1.RegisterHarnessServiceServer(grpcServer, newHarnessServer(config.HarnessService, config.MaxMessageBytes))
 	apiv1alpha1.RegisterSandboxServiceServer(grpcServer, &sandboxServer{service: config.SandboxService})
 	guestServer := &sandboxGuestServer{service: config.SandboxService}
-	guestpb.RegisterProcessServiceServer(grpcServer, guestServer)
-	guestpb.RegisterFileSystemServiceServer(grpcServer, guestServer)
+	guestpb.RegisterTaskExecutionServiceServer(grpcServer, guestServer)
 	apiv1alpha1.RegisterSandboxTemplateServiceServer(grpcServer, &sandboxTemplateServer{service: config.SandboxTemplateService, maxMessageBytes: config.MaxMessageBytes})
 	apiv1alpha1.RegisterModelServiceServer(grpcServer, newModelServer(config.ModelService, config.MaxMessageBytes))
 	apiv1alpha1.RegisterToolServiceServer(grpcServer, newToolServer(config.ToolService, config.MaxMessageBytes))

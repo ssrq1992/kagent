@@ -14,7 +14,6 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2apb/v1/pbconv"
 	apiv1alpha1 "github.com/kagent-dev/kagent/go/api/gen/kagent/api/v1alpha1"
 	"github.com/kagent-dev/kagent/go/core/internal/database"
-	"github.com/kagent-dev/kagent/go/core/internal/substrate"
 	"github.com/kagent-dev/kagent/go/core/pkg/auth"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -44,14 +43,14 @@ func (s *Service) session(ctx context.Context, sessionID string) (*apiv1alpha1.S
 	authSession, _ := auth.AuthSessionFrom(ctx)
 	identity, ok := authSession.(runtimeSession)
 	if !ok || identity.sessionID != sessionID {
-		return nil, status.Error(codes.PermissionDenied, "actor does not belong to this session")
+		return nil, status.Error(codes.PermissionDenied, "AX Task does not belong to this session")
 	}
-	session, err := s.store.GetSessionForRuntime(ctx, sessionID, identity.actorUID)
+	session, err := s.store.GetSessionForRuntime(ctx, sessionID, identity.taskUID)
 	if err != nil {
 		return nil, storageError(err)
 	}
-	if session.A2AAuthority != substrate.ActorHost(identity.atespace, substrate.ActorName(sessionID), "") {
-		return nil, status.Error(codes.PermissionDenied, "actor does not belong to this session")
+	if session.A2AAuthority != identity.taskUID || session.GetAgent().GetNamespace() != identity.atespace {
+		return nil, status.Error(codes.PermissionDenied, "AX Task does not belong to this session")
 	}
 	return session, nil
 }
@@ -183,4 +182,18 @@ func storageError(err error) error {
 	default:
 		return err
 	}
+}
+
+// ResolveSession is authenticated on every call, including after a DATA restore.
+func (s *Service) ResolveSession(ctx context.Context, _ *apiv1alpha1.TaskStoreServiceResolveSessionRequest) (*apiv1alpha1.TaskStoreServiceResolveSessionResponse, error) {
+	authSession, _ := auth.AuthSessionFrom(ctx)
+	identity, ok := authSession.(runtimeSession)
+	if !ok {
+		return nil, status.Error(codes.Unauthenticated, "AX runtime identity required")
+	}
+	session, err := s.session(ctx, identity.sessionID)
+	if err != nil {
+		return nil, err
+	}
+	return &apiv1alpha1.TaskStoreServiceResolveSessionResponse{SessionId: session.Id}, nil
 }

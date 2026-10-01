@@ -3,9 +3,9 @@ package controller
 import (
 	"context"
 	"fmt"
+	ax "github.com/google/ax/pkg/apis/v1alpha1"
 	"time"
 
-	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"github.com/kagent-dev/kagent/go/core/internal/database"
 	"github.com/kagent-dev/kagent/go/pkg/logging"
 	"google.golang.org/grpc/codes"
@@ -21,15 +21,10 @@ type runtimeRevisionGCStore interface {
 	DeleteRuntimeRevision(context.Context, string, string) error
 }
 
-type runtimeRevisionGCClient interface {
-	GetActorTemplate(context.Context, string, string) (*ateapipb.ActorTemplate, error)
-	DeleteActorTemplate(context.Context, string, string) error
-}
-
 // RuntimeRevisionGC retries durable runtime deletions independently of preparation.
 type RuntimeRevisionGC struct {
-	store     runtimeRevisionGCStore
-	templates runtimeRevisionGCClient
+	store runtimeRevisionGCStore
+	ax    ax.AXClient
 }
 
 var (
@@ -37,8 +32,8 @@ var (
 	_ manager.LeaderElectionRunnable = (*RuntimeRevisionGC)(nil)
 )
 
-func NewRuntimeRevisionGC(store runtimeRevisionGCStore, templates runtimeRevisionGCClient) *RuntimeRevisionGC {
-	return &RuntimeRevisionGC{store: store, templates: templates}
+func NewRuntimeRevisionGC(store runtimeRevisionGCStore, client ax.AXClient) *RuntimeRevisionGC {
+	return &RuntimeRevisionGC{store: store, ax: client}
 }
 
 func (r *RuntimeRevisionGC) NeedLeaderElection() bool { return true }
@@ -87,21 +82,13 @@ func (r *RuntimeRevisionGC) collect(ctx context.Context, id string) error {
 	if revision == nil {
 		return nil
 	}
-	template, err := r.templates.GetActorTemplate(ctx, revision.ActorTemplateAtespace, revision.ActorTemplateName)
+	ref := &ax.ResourceRef{Atespace: revision.PreparedRuntimeAtespace, Name: revision.PreparedRuntimeName, Uid: revision.PreparedRuntimeUID}
+	if err := ax.ValidateRef(ref, true); err != nil {
+		return err
+	}
+	_, err = r.ax.ReleasePreparedRuntime(ctx, &ax.ReleasePreparedRuntimeRequest{Ref: ref, OperationId: "gc-" + revision.Revision})
 	if err != nil && status.Code(err) != codes.NotFound {
-		return fmt.Errorf("get unreferenced ActorTemplate %s/%s: %w", revision.ActorTemplateAtespace, revision.ActorTemplateName, err)
+		return fmt.Errorf("release AX runtime: %w", err)
 	}
-	if err == nil && (revision.ActorTemplateUID == "" || template.GetMetadata().GetUid() != revision.ActorTemplateUID) {
-		return fmt.Errorf("unreferenced ActorTemplate %s/%s UID changed", revision.ActorTemplateAtespace, revision.ActorTemplateName)
-	}
-	// Both deletes tolerate already-missing objects. If runtime cleanup succeeds
-	// but database finalization fails, the durable deletion marker keeps this
-	// revision discoverable so the next sweep can safely retry the sequence.
-	if err := r.templates.DeleteActorTemplate(ctx, revision.ActorTemplateAtespace, revision.ActorTemplateName); err != nil {
-		return fmt.Errorf("delete unreferenced ActorTemplate %s/%s: %w", revision.ActorTemplateAtespace, revision.ActorTemplateName, err)
-	}
-	if err := r.store.DeleteRuntimeRevision(ctx, revision.Revision, revision.ActorTemplateUID); err != nil {
-		return fmt.Errorf("delete unreferenced runtime revision %s: %w", revision.Revision, err)
-	}
-	return nil
+	return r.store.DeleteRuntimeRevision(ctx, revision.Revision, revision.PreparedRuntimeUID)
 }

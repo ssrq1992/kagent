@@ -31,7 +31,7 @@ func TestTaskViewsRebuildFromEvents(t *testing.T) {
 	assertReplay := func() {
 		t.Helper()
 		events, err := queryMany(ctx, q, `
-			SELECT sequence, history_id, task_id, data, created_at, message_id, task_position, snapshot_atespace, snapshot_uri, snapshot_content_scope FROM session_task_event WHERE
+			SELECT sequence, history_id, task_id, data, created_at, message_id, task_position, runtime_atespace, runtime_reference, snapshot_content_scope FROM session_task_event WHERE
 			    history_id = $1 ORDER BY sequence
 		`, pgx.RowToStructByName[sessionTaskEventRow], sessionRow.HistoryID)
 		require.NoError(t, err)
@@ -56,8 +56,8 @@ func TestTaskViewsRebuildFromEvents(t *testing.T) {
 			}
 			require.Equal(t, stored.Position, rebuilt.Position)
 			require.Equal(t, stored.CreatedAt, rebuilt.CreatedAt)
-			require.Equal(t, stored.SnapshotURI, rebuilt.SnapshotURI)
-			require.Equal(t, stored.SnapshotAtespace, rebuilt.SnapshotAtespace)
+			require.Equal(t, stored.RuntimeReference, rebuilt.RuntimeReference)
+			require.Equal(t, stored.RuntimeAtespace, rebuilt.RuntimeAtespace)
 			require.Equal(t, stored.SnapshotContentScope, rebuilt.SnapshotContentScope)
 			require.Equal(t, stored.HistorySequence, rebuilt.HistorySequence)
 		}
@@ -91,7 +91,7 @@ func TestTaskViewsRebuildFromEvents(t *testing.T) {
 		task.Status = a2a.TaskStatus{State: state, Timestamp: &now}
 		var snapshot *SessionTaskSnapshot
 		if state == a2a.TaskStateCompleted {
-			snapshot = &SessionTaskSnapshot{Atespace: "team-a", URI: "completed", ContentScope: "DATA"}
+			snapshot = &SessionTaskSnapshot{Atespace: "team-a", Reference: "completed", ContentScope: "DATA"}
 		}
 		require.NoError(t, saveRuntimeTask(t, client, session.Id, task, message, snapshot))
 		assertReplay()
@@ -111,7 +111,7 @@ func TestTaskViewsRebuildFromEvents(t *testing.T) {
 	assertReplay()
 	// A source task changing or even losing its view must not affect an old fork.
 	events, err := queryMany(ctx, q, `
-		SELECT sequence, history_id, task_id, data, created_at, message_id, task_position, snapshot_atespace, snapshot_uri, snapshot_content_scope FROM session_task_event WHERE
+		SELECT sequence, history_id, task_id, data, created_at, message_id, task_position, runtime_atespace, runtime_reference, snapshot_content_scope FROM session_task_event WHERE
 		    history_id = $1 ORDER BY sequence
 	`, pgx.RowToStructByName[sessionTaskEventRow], sessionRow.HistoryID)
 	require.NoError(t, err)

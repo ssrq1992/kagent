@@ -5,12 +5,16 @@ import (
 	"errors"
 	"time"
 
+	ax "github.com/google/ax/pkg/apis/v1alpha1"
 	"github.com/google/uuid"
 	apiv1alpha1 "github.com/kagent-dev/kagent/go/api/gen/kagent/api/v1alpha1"
+	"github.com/kagent-dev/kagent/go/core/internal/axruntime"
 	"github.com/kagent-dev/kagent/go/core/internal/database"
-	"github.com/kagent-dev/kagent/go/core/internal/substrate"
 	"github.com/kagent-dev/kagent/go/pkg/logging"
 	"golang.org/x/sync/errgroup"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 )
 
@@ -37,21 +41,38 @@ func (s *Service) run(ctx context.Context, id string, kind apiv1alpha1.RuntimeOp
 	if err != nil {
 		return nil, sandboxError(err)
 	}
-	binding := substrate.ActorBinding{Atespace: revision.ActorTemplateAtespace, Name: substrate.ActorName(id),
-		TemplateAtespace: revision.ActorTemplateAtespace, TemplateName: revision.ActorTemplateName}
-	var creation *substrate.ActorCreation
-	if kind == apiv1alpha1.RuntimeOperation_RUNTIME_OPERATION_CREATE {
-		policy, err := substrate.ActorEgressPolicy(binding.Atespace, nil, nil)
-		if err != nil {
-			return nil, sandboxError(err)
+	binding := axruntime.Binding{Task: &ax.ResourceRef{Atespace: revision.PreparedRuntimeAtespace, Name: "sandbox-" + id}, Runtime: &ax.ResourceRef{Atespace: revision.PreparedRuntimeAtespace, Name: revision.PreparedRuntimeName, Uid: revision.PreparedRuntimeUID}}
+	saved, bindingErr := s.config.Store.GetAXBinding(ctx, id)
+	if bindingErr == nil {
+		binding.Task = saved.Task
+		binding.Runtime = saved.PreparedRuntime
+		binding.Group = saved.Group
+	} else if !errors.Is(bindingErr, database.ErrNotFound) {
+		return nil, sandboxError(bindingErr)
+	}
+	operation := map[apiv1alpha1.RuntimeOperation]axruntime.Operation{
+		apiv1alpha1.RuntimeOperation_RUNTIME_OPERATION_CREATE:  axruntime.Create,
+		apiv1alpha1.RuntimeOperation_RUNTIME_OPERATION_RESUME:  axruntime.Resume,
+		apiv1alpha1.RuntimeOperation_RUNTIME_OPERATION_SUSPEND: axruntime.Suspend,
+		apiv1alpha1.RuntimeOperation_RUNTIME_OPERATION_DELETE:  axruntime.Delete,
+	}[kind]
+	if operation == axruntime.Delete && binding.Task.Uid == "" {
+		creation, e := s.config.Store.GetAXCreation(ctx, id)
+		if e == nil {
+			task, e := s.config.Runtime.GetTask(ctx, &ax.GetTaskRequest{Atespace: creation.Atespace, Name: creation.TaskName, RefreshRuntime: true})
+			if e != nil {
+				return nil, sandboxError(e)
+			}
+			if task.GetMetadata().GetUid() == "" || task.GetStatus().GetRuntimeStatus().GetLastOperationId() != creation.OperationID.String() || !proto.Equal(task.GetSpec().GetPreparedRuntimeRef(), binding.Runtime) {
+				return nil, sandboxError(status.Error(codes.FailedPrecondition, "unresolved sandbox creation requires AX recovery"))
+			}
+			binding.Task = ax.Ref(task.Metadata)
+			binding.Group = task.Spec.GroupRef
+		} else if !errors.Is(e, database.ErrNotFound) {
+			return nil, sandboxError(e)
 		}
-		creation = &substrate.ActorCreation{EgressPolicy: policy, Resume: true}
 	}
-	prepare := substrate.PrepareActorTransition
-	if op.ExecutorID != uuid.Nil {
-		prepare = substrate.PrepareActorRetry
-	}
-	transition, err := prepare(ctx, s.config.Actors, binding, kind, creation)
+	transition, err := axruntime.Prepare(ctx, s.config.Runtime, axruntime.Intent{Binding: binding, Operation: operation, RequestID: op.ID.String(), Start: operation == axruntime.Create}, op.ExecutorID != uuid.Nil)
 	if err != nil {
 		return nil, sandboxError(err)
 	}
@@ -71,7 +92,14 @@ func (s *Service) run(ctx context.Context, id string, kind apiv1alpha1.RuntimeOp
 		defer cancel()
 		err = errors.Join(err, s.config.Store.ReleaseRuntimeOperation(finishCtx, id, op.ID, executorID))
 	}()
-	if err := substrate.ApplyActorTransition(ctx, s.config.Actors, transition); err != nil {
+	if operation == axruntime.Create {
+		if e := s.config.Store.ReserveAXCreation(ctx, id, op.ID, executorID, binding.Task, binding.Runtime); e != nil {
+			return nil, sandboxError(e)
+		}
+	}
+	if _, err := axruntime.ApplyWithBinding(ctx, s.config.Runtime, transition, func(ctx context.Context, task *ax.Task) error {
+		return s.config.Store.RecordAXBinding(ctx, id, op.ID, executorID, database.AXBinding{Task: ax.Ref(task.Metadata), Group: task.Spec.GroupRef, PreparedRuntime: task.Spec.PreparedRuntimeRef})
+	}); err != nil {
 		return nil, sandboxError(err)
 	}
 	finishCtx, cancelFinish := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)

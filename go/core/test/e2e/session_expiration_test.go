@@ -6,15 +6,15 @@ import (
 	"testing"
 	"time"
 
+	"crypto/tls"
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/google/uuid"
 	apiv1alpha1 "github.com/kagent-dev/kagent/go/api/gen/kagent/api/v1alpha1"
-	"github.com/kagent-dev/kagent/go/core/internal/substrate"
 	kagentenv "github.com/kagent-dev/kagent/go/core/pkg/env"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/status"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -46,14 +46,14 @@ func TestSessionIdleExpiration(t *testing.T) {
 		conversation.sessionID, conversation.contextID = id, created.Session.ContextId
 		_, _, task := conversation.send(t, "What is 2+2?")
 		require.Equal(t, a2a.TaskStateCompleted, task.Status.State)
-		assertActorSuspended(t, &conversation)
+		assertAXTaskSuspended(t, &conversation)
 		require.Eventually(t, func() bool {
 			_, err := fixture.sessions.GetSession(fixture.ctx, &apiv1alpha1.GetSessionRequest{SessionId: id})
 			return status.Code(err) == codes.NotFound
 		}, 2*time.Minute, time.Second, "idle session did not expire")
-		actor, err := findSubstrateActor(fixture.ctx, fixture.system, request.Agent.Namespace, substrate.ActorName(id))
+		actor, err := findAXTask(fixture.ctx, newAXRuntimeClient(t), request.Agent.Namespace, "session-"+id)
 		require.NoError(t, err)
-		require.Nil(t, actor, "expiration must remove the Substrate Actor")
+		require.Nil(t, actor, "expiration must remove the AX Task")
 		var fresh *apiv1alpha1.CreateSessionResponse
 		require.Eventually(t, func() bool {
 			fresh, err = fixture.sessions.CreateSession(fixture.ctx, request)
@@ -105,7 +105,7 @@ func setSessionExpirationPolicy(t *testing.T, target, ttl, pollInterval string) 
 		// Deployment readiness can precede Service/load-balancer routing.
 		// Check a fresh API connection after both setup and cleanup rollouts
 		// before handing the controller back to the next test.
-		conn, err := grpc.NewClient(target, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		conn, err := grpc.NewClient(target, grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{MinVersion: tls.VersionTLS12})))
 		require.NoError(t, err)
 		defer func() { require.NoError(t, conn.Close()) }()
 		err = waitForControllerAPI(ctx, conn)

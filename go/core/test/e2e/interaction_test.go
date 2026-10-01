@@ -68,7 +68,7 @@ func TestSessionInteraction(t *testing.T) {
 		}
 		// Completion is visible before idle suspension finishes. Wait separately
 		// to verify that later traffic wakes the same Actor for the next task.
-		assertActorSuspended(t, fixture)
+		assertAXTaskSuspended(t, fixture)
 		_, _, task = fixture.send(t, "What is 2+2?")
 		if task.Status.State != a2atype.TaskStateCompleted {
 			t.Fatalf("second A2A task state = %s, text = %q, want COMPLETED", task.Status.State, taskText(task))

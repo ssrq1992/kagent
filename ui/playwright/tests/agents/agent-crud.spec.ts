@@ -42,7 +42,7 @@ for (const { template, harness } of CASES) {
       if (harness === "inline") {
         await chooseSource(page, "harness", "inline");
         await page.getByTestId("harness-image").fill(IMAGE);
-        await page.getByTestId("harness-worker-pool").fill("pool-before");
+        await selectOption(page, "harness-task-group", "kagent-default (Ready, 3)");
         await page.getByTestId("harness-snapshot").fill("gs://snapshots/crud/");
       } else {
         await selectOption(page, "agent-form-harness-ref", "k8s-agent");
@@ -85,8 +85,8 @@ for (const { template, harness } of CASES) {
         await selectOption(page, "agent-form-template-ref", "k8s-agent-7f3a91c");
       }
       if (harness === "inline") {
-        await expect(page.getByTestId("harness-worker-pool")).toHaveValue("pool-before");
-        await page.getByTestId("harness-worker-pool").fill("pool-after");
+        await expect(page.getByTestId("harness-task-group")).toContainText("kagent-default");
+        await selectOption(page, "harness-task-group", "batch (Ready, 3)");
       } else {
         await expect(page.getByTestId("agent-form-harness-ref")).toContainText("k8s-agent");
         await selectOption(page, "agent-form-harness-ref", "fast-lane");
@@ -104,7 +104,7 @@ for (const { template, harness } of CASES) {
       // The inline harness is not on the row, so read it back from the form.
       if (harness === "inline") {
         await page.getByTestId(`edit-${name}`).click();
-        await expect(page.getByTestId("harness-worker-pool")).toHaveValue("pool-after");
+        await expect(page.getByTestId("harness-task-group")).toContainText("batch");
         await page.getByRole("button", { name: "Cancel", exact: true }).click();
         await expect(row(page)).toHaveCount(1);
       }

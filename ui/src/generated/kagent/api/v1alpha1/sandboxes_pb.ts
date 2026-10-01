@@ -321,8 +321,8 @@ export const DeleteSandboxResponseSchema: GenMessage<DeleteSandboxResponse> = /*
 
 /**
  * SandboxService owns standalone scratch environments. Guest calls cannot target
- * Sessions. Execution uses the upstream ateenv.v1alpha ProcessService and
- * FileSystemService on the same apiserver, with kagent-sandbox-id metadata.
+ * Sessions. Execution uses AX TaskExecutionService on the same apiserver,
+ * with kagent-sandbox-id metadata. AX owns the private Guest wire protocol.
  * Suspension may interrupt running commands and file transfers.
  * Lifecycle mutations execute inline. After a retryable error, repeat the same
  * mutation; CreateSandbox retries must keep the same request_id and input.

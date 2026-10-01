@@ -42,7 +42,7 @@ func (c *Client) UpsertSandboxTemplateDefinition(ctx context.Context, definition
 			return err
 		}
 		revisions, err := queryMany(ctx, tx, `
-			SELECT r.revision, r.kind, r.namespace, r.actor_template_atespace, r.actor_template_name, r.actor_template_uid, r.deleted_at
+			SELECT r.revision, r.kind, r.namespace, r.prepared_runtime_atespace, r.prepared_runtime_name, r.prepared_runtime_uid, r.deleted_at
 			FROM runtime_revision r JOIN sandbox_template_definition p
 			    ON r.revision IN (p.desired_revision, p.latest_successful_revision)
 			WHERE p.namespace = $1 AND p.sandbox_template_uid = $2 ORDER BY r.revision FOR UPDATE OF r
@@ -102,7 +102,7 @@ func (c *Client) RecordSandboxRevision(ctx context.Context, revision SandboxRevi
 
 func (c *Client) GetSandboxRevision(ctx context.Context, revision string) (*SandboxRevision, error) {
 	row, err := queryOne(ctx, c.db, `
-		SELECT r.revision, r.kind, r.namespace, r.actor_template_atespace, r.actor_template_name, r.actor_template_uid,
+		SELECT r.revision, r.kind, r.namespace, r.prepared_runtime_atespace, r.prepared_runtime_name, r.prepared_runtime_uid,
 		    r.deleted_at, r.source_snapshot, s.sandbox_template_name, s.sandbox_template_uid
 		FROM runtime_revision r JOIN sandbox_revision s USING (revision) WHERE r.revision = $1 AND r.kind = 'sandbox'
 	`, pgx.RowToStructByName[SandboxRevision], revision)

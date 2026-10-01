@@ -8,12 +8,12 @@ import (
 	"fmt"
 	"time"
 
+	ax "github.com/google/ax/pkg/apis/v1alpha1"
 	"github.com/google/uuid"
 	apiv1alpha1 "github.com/kagent-dev/kagent/go/api/gen/kagent/api/v1alpha1"
 	"github.com/kagent-dev/kagent/go/api/v1alpha3"
 	"github.com/kagent-dev/kagent/go/core/internal/database"
 	"github.com/kagent-dev/kagent/go/core/internal/service/serviceerrors"
-	"github.com/kagent-dev/kagent/go/core/internal/substrate"
 	"github.com/kagent-dev/kagent/go/core/pkg/auth"
 	"google.golang.org/protobuf/proto"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -25,7 +25,7 @@ type Config struct {
 	Store      *database.Client
 	Kube       client.Client
 	Authorizer auth.Authorizer
-	Actors     substrate.LifecycleClient
+	Runtime    ax.AXClient
 	Guests     *GuestDialer
 	DefaultTTL time.Duration
 	MaxTTL     time.Duration

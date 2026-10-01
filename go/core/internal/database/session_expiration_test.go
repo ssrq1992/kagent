@@ -39,7 +39,7 @@ func TestSessionExpirationTaskAdmission(t *testing.T) {
 			client, session := expirationFixture(t)
 			task := newSessionTask(uuid.NewString(), "message")
 			task.ContextID, task.Status.State = session.ContextId, test.state
-			snapshot := &SessionTaskSnapshot{Atespace: "team-a", URI: "s3://snapshot", ContentScope: "FULL"}
+			snapshot := &SessionTaskSnapshot{Atespace: "team-a", Reference: "s3://snapshot", ContentScope: "FULL"}
 			require.NoError(t, saveRuntimeTask(t, client, session.Id, task, task, snapshot))
 			_, err := client.BeginIdleSessionDeletion(t.Context(), session.Id, time.Now())
 			if test.allow {
@@ -71,7 +71,7 @@ func TestSessionExpirationRechecksActivity(t *testing.T) {
 	require.NoError(t, err)
 	_, err = client.BeginIdleSessionDeletion(ctx, session.Id, time.Now())
 	require.ErrorIs(t, err, ErrFailedPrecondition, "a claimed suspension blocks expiration")
-	require.NoError(t, client.FinishSessionQuiescence(ctx, work, &SessionTaskSnapshot{Atespace: "team-a", URI: "s3://snapshot", ContentScope: "FULL"}))
+	require.NoError(t, client.FinishSessionQuiescence(ctx, work, &SessionTaskSnapshot{Atespace: "team-a", Reference: "s3://snapshot", ContentScope: "FULL"}))
 	_, err = client.BeginIdleSessionDeletion(ctx, session.Id, before)
 	require.ErrorIs(t, err, ErrConflict, "an event after the scan starts a new idle period")
 	ids, err = client.ListIdleSessions(ctx, before, "", 100)
@@ -150,7 +150,7 @@ func TestSessionExpirationCheckpointAdmission(t *testing.T) {
 	client, session := expirationFixture(t)
 	task := newSessionTask(uuid.NewString(), "message")
 	task.ContextID, task.Status.State = session.ContextId, a2a.TaskStateCompleted
-	require.NoError(t, saveRuntimeTask(t, client, session.Id, task, task, &SessionTaskSnapshot{Atespace: "team-a", URI: "s3://snapshot", ContentScope: "DATA"}))
+	require.NoError(t, saveRuntimeTask(t, client, session.Id, task, task, &SessionTaskSnapshot{Atespace: "team-a", Reference: "s3://snapshot", ContentScope: "DATA"}))
 	checkpoint, _, err := client.ReserveSessionCheckpoint(t.Context(), &apiv1alpha1.Checkpoint{
 		Id: uuid.NewString(), SessionId: session.Id, HeadTaskId: string(task.ID),
 	}, session.Creator, "checkpoint")

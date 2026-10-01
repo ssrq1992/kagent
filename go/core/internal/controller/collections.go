@@ -3,8 +3,7 @@ package controller
 import (
 	"reflect"
 
-	atev1alpha1 "github.com/agent-substrate/substrate/pkg/api/v1alpha1"
-	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
+	ax "github.com/google/ax/pkg/apis/v1alpha1"
 	kagentv1alpha3 "github.com/kagent-dev/kagent/go/api/v1alpha3"
 	v2translator "github.com/kagent-dev/kagent/go/core/internal/translator"
 	"google.golang.org/protobuf/proto"
@@ -25,7 +24,7 @@ type Collections struct {
 	RemoteMCPServers         krt.Collection[*kagentv1alpha3.RemoteMCPServer]
 	ConfigMaps               krt.Collection[*corev1.ConfigMap]
 	Secrets                  krt.Collection[*corev1.Secret]
-	WorkerPools              krt.Collection[*atev1alpha1.WorkerPool]
+	TaskGroups               krt.StaticCollection[v2translator.TaskGroupObservation]
 	AgentRuntimeObservations krt.StaticCollection[AgentRuntimeObservation]
 	Reconciliations          krt.Collection[AgentReconciliation]
 	ModelConfigStatuses      krt.StatusCollection[*kagentv1alpha3.ModelConfig, kagentv1alpha3.ModelConfigStatus]
@@ -39,7 +38,7 @@ type AgentRuntimeObservation struct {
 	Namespace  string
 	AgentName  string
 	RevisionID v2translator.RevisionID
-	Template   *ateapipb.ActorTemplate
+	Template   *ax.PreparedRuntime
 	Failure    *ReconciliationFailure
 }
 
@@ -69,12 +68,12 @@ func NewCollections(client kube.Client, watchNamespaces []string, opts krt.Optio
 	remoteMCPServers := typedCollection[*kagentv1alpha3.RemoteMCPServer](client, watchNamespaces, "RemoteMCPServers", opts)
 	configMaps := typedCollection[*corev1.ConfigMap](client, watchNamespaces, "ConfigMaps", opts)
 	secrets := typedCollection[*corev1.Secret](client, watchNamespaces, "Secrets", opts)
-	workerPools := typedCollection[*atev1alpha1.WorkerPool](client, watchNamespaces, "WorkerPools", opts)
+	taskGroups := krt.NewStaticCollection[v2translator.TaskGroupObservation](nil, nil, opts.WithName("AXTaskGroups")...)
 	agentRuntimeObservations := krt.NewStaticCollection[AgentRuntimeObservation](nil, nil, opts.WithName("AgentRuntimeObservations")...)
 	modelConfigStatuses, resolvedModelConfigs := newModelConfigReconciliations(modelConfigs, configMaps, secrets, opts)
 	compilerCollections := v2translator.Collections{
 		Harnesses: harnesses, AgentTemplates: agentTemplates, ResolvedModelConfigs: resolvedModelConfigs, RemoteMCPServers: remoteMCPServers,
-		ConfigMaps: configMaps, Secrets: secrets, WorkerPools: workerPools,
+		ConfigMaps: configMaps, Secrets: secrets, TaskGroups: taskGroups,
 	}
 	reconciliations := newAgentReconciliations(agents, compilerCollections, agentRuntimeObservations, opts)
 	statuses := newAgentStatuses(agents, reconciliations, opts)
@@ -88,7 +87,7 @@ func NewCollections(client kube.Client, watchNamespaces []string, opts krt.Optio
 		RemoteMCPServers:         remoteMCPServers,
 		ConfigMaps:               configMaps,
 		Secrets:                  secrets,
-		WorkerPools:              workerPools,
+		TaskGroups:               taskGroups,
 		AgentRuntimeObservations: agentRuntimeObservations,
 		Reconciliations:          reconciliations,
 		ModelConfigStatuses:      modelConfigStatuses,

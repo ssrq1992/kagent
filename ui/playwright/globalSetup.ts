@@ -15,7 +15,7 @@ import { LIVE_PROJECT } from "../playwright.config";
  * Loading each app once here moves that reload before any test exists.
  */
 export default async function globalSetup(config: FullConfig): Promise<void> {
-  const browser = await chromium.launch();
+  const browser = await chromium.launch({ channel: process.env.KAGENT_E2E_BROWSER_CHANNEL });
   try {
     for (const project of config.projects) {
       const baseUrl = project.use.baseURL;

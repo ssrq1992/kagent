@@ -10,8 +10,9 @@ import (
 	"testing"
 	"time"
 
+	ax "github.com/google/ax/pkg/apis/v1alpha1"
 	"github.com/kagent-dev/kagent/go/api/v1alpha3"
-	"github.com/kagent-dev/kagent/go/core/internal/substrate"
+	"github.com/kagent-dev/kagent/go/core/internal/axruntime"
 	v2translator "github.com/kagent-dev/kagent/go/core/internal/translator"
 	claudeconfig "github.com/kagent-dev/kagent/go/harness/claude/config"
 	"github.com/kagent-dev/kagent/go/pkg/tracing"
@@ -612,7 +613,7 @@ func testInput(t *testing.T, modelSpec v1alpha3.ModelConfigSpec, secretData map[
 	t.Helper()
 	harness := &v2translator.HarnessConfiguration{Name: "claude", Namespace: "test", Source: &metav1.ObjectMeta{Name: "claude", Namespace: "test", UID: "harness-uid"}, Spec: v1alpha3.HarnessSpec{
 		Claude: &v1alpha3.ClaudeHarness{}, Workload: v1alpha3.HarnessWorkload{Image: "example.com/claude@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
-		Substrate: v1alpha3.RuntimeSubstratePolicy{WorkerPoolRef: corev1.LocalObjectReference{Name: "default"}, SnapshotPolicy: v1alpha3.RuntimeSnapshotPolicy{Location: "snapshots"}},
+		AX: v1alpha3.RuntimeAXPolicy{TaskGroupRef: corev1.LocalObjectReference{Name: "default"}, SnapshotLocationOverride: "s3://snapshots"},
 	}}
 	template := &v2translator.TemplateConfiguration{Name: "assistant", Namespace: "test", Source: &metav1.ObjectMeta{Name: "assistant", Namespace: "test", UID: "template-uid"}, Spec: v1alpha3.AgentTemplateSpec{
 		ModelConfig: &corev1.LocalObjectReference{Name: "model"}, Description: "assistant", SystemPrompt: "help carefully",
@@ -738,9 +739,10 @@ func TestCompiledTelemetryFitsTheActorEnvironmentBudget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	template, err := substrate.ActorTemplateForRevision(&revision.Revision, revisionID)
+	revision.GroupRef = &ax.ResourceRef{Atespace: revision.Namespace, Name: "group", Uid: "group-uid"}
+	template, err := axruntime.RuntimeForRevision(&revision.Revision, revisionID)
 	if err != nil {
 		t.Fatalf("worst-case Claude actor does not fit Substrate: %v", err)
 	}
-	t.Logf("worst-case Claude actor uses %d of 32 environment variables", len(template.GetContainers()[0].GetEnv()))
+	t.Logf("worst-case Claude actor uses %d of 24 application environment variables", len(template.Spec.Env))
 }

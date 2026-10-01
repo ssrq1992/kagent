@@ -15,12 +15,6 @@ import type {
 } from "@/api/domain/models";
 import type { PromptTemplateDetail, PromptTemplateSummary } from "@/api/domain/prompts";
 import type { NamespaceResponse } from "@/api/domain/namespaces";
-import type {
-  SubstrateActorEntry,
-  SubstrateActorTemplateEntry,
-  SubstrateWorkerEntry,
-  SubstrateWorkerPoolEntry,
-} from "@/api/domain/substrate";
 import type { Harness, HarnessSpec } from "@/api/domain/harnesses";
 import type { Agent, AgentSpec, AgentStatus } from "@/api/domain/agents";
 import type { AgentTemplate } from "@/api/domain/agentTemplates";
@@ -276,90 +270,6 @@ export const mockNamespaces: NamespaceResponse[] = [
 ];
 
 /**
- * Substrate inventory.
- *
- * `ateApiError` is set deliberately: a successful response whose runtime halves
- * are partial is the state most likely to be rendered as though everything were
- * fine, so the fixture makes it the default rather than a special case.
- */
-export const mockSubstrateInventory: {
-  ateApiError?: string;
-  workerPools: SubstrateWorkerPoolEntry[];
-  actorTemplates: SubstrateActorTemplateEntry[];
-  actors: SubstrateActorEntry[];
-  workers: SubstrateWorkerEntry[];
-} = {
-  ateApiError: "ate-api list actors timed out after 5s; actors may be incomplete",
-  workerPools: [
-    { namespace: "kagent", name: "kagent-default", replicas: 3, ateomImage: "ghcr.io/ate-dev/ateom:1.4.0" },
-    { namespace: "platform", name: "gpu-pool", replicas: 1, ateomImage: "ghcr.io/ate-dev/ateom:1.4.0" },
-  ],
-  actorTemplates: [
-    {
-      atespace: "kagent",
-      name: "coder-template",
-      phase: "Ready",
-      goldenTag: "ate-golden/snap-2026-07-28",
-      sandboxClass: "gvisor",
-      workerSelector: "pool=kagent-default",
-    },
-    {
-      atespace: "platform",
-      name: "external-template",
-      phase: "Pending",
-    },
-  ],
-  actors: [
-    {
-      actorId: "actor-7f21",
-      atespace: "team-a",
-      status: "Running",
-      actorTemplateAtespace: "kagent",
-      actorTemplateName: "coder-template",
-      ateomPodNamespace: "kagent",
-      ateomPodName: "ateom-kagent-default-0",
-      ateomPodIp: "10.42.1.19",
-      latestSnapshot: "snap-2026-07-29",
-      workerPoolName: "kagent-default",
-      version: 4,
-    },
-    { actorId: "actor-9c03", atespace: "kagent", status: "Suspending", inProgressSnapshot: "snap-2026-07-30", version: 2 },
-    // The raw wire constant, because that is what a real controller sends for a state
-    // it has no name for — a fixture of tidy words would let `ACTOR_STATE_CRASHED`
-    // reach the page unread and no test object.
-    { actorId: "actor-0aa1", atespace: "kagent", status: "ACTOR_STATE_CRASHED", version: 1 },
-    { actorId: "actor-3b55", atespace: "kagent", status: "Running", version: 1 },
-    // Parked rather than broken, and the only status here that reads as neither:
-    // without it nothing on the page is drawn in the idle tone.
-    { actorId: "actor-5d17", atespace: "kagent", status: "Paused", version: 1 },
-    // The controller's other unnamed state. `ACTOR_STATE_CRASHED` alone would pass a
-    // humaniser that special-cased that one word; two of them do not.
-    { actorId: "actor-2e40", atespace: "kagent", status: "ACTOR_STATE_DELETING", version: 1 },
-    // A transition, and a word the page recognises by its shape rather than from a
-    // list — the same rule that has to carry `Suspending` and `Pausing`.
-    { actorId: "actor-8b91", atespace: "kagent", status: "Resuming", version: 1 },
-    { actorId: "actor-c3f5", atespace: "kagent", status: "Suspended", version: 3 },
-  ],
-  /*
-   * No actor on any worker, because the controller cannot put one there: ate-api's
-   * `Worker` carries capacity and allocation and no actor reference. This fixture used
-   * to name an actor and a template on the first worker, which made the columns look
-   * populated in mock mode and blank against every real cluster — a fixture agreeing
-   * with a type and a test while all three disagreed with the controller.
-   */
-  workers: [
-    {
-      workerNamespace: "kagent",
-      workerPool: "kagent-default",
-      workerPod: "ateom-kagent-default-0",
-      ip: "10.42.1.19",
-      version: 4,
-    },
-    { workerNamespace: "kagent", workerPool: "kagent-default", workerPod: "ateom-kagent-default-1" },
-  ],
-};
-
-/**
  * Who the fixture backend treats every caller as.
  *
  * The controller filters an instance list by the authenticated user unless
@@ -465,7 +375,7 @@ export const mockAgentInstances: AgentInstance[] = [
     failure: {
       reason: "ActorUnavailable",
       message:
-        "actor kagent/agent-d4b02f87 cannot be resumed from status ACTOR_STATE_TERMINATED",
+        "AX Task cannot resume because its runtime is missing",
     },
     createdAt: "2026-08-15T11:30:00Z",
     updatedAt: "2026-08-20T22:41:00Z",
@@ -592,7 +502,7 @@ export const mockAgentInstances: AgentInstance[] = [
 /**
  * The harnesses an agent can be built on.
  *
- * A `Harness` is reusable execution configuration: which adapter, which worker pool,
+ * A `Harness` is reusable execution configuration: which adapter, which TaskGroup,
  * which digest-pinned image. `k8s-agent` and `support-triage` are the two the
  * instances above are cut from, so the create form and the instance list agree with
  * each other.
@@ -615,7 +525,7 @@ export const mockHarnesses: Harness[] = [
       spec: {
         kagent: {},
         workload: { image: "ghcr.io/kagent-dev/kagent/golang-adk@sha256:3f1c9d2e5b7a48e0a1c6d9f2b4e8a7c30d5f6e9b2a4c8d1e7f0b3a6c9d2e5f8a" },
-        substrate: { workerPoolRef: { name: "kagent-default" }, snapshotPolicy: { location: "gs://snapshots/kagent/" } },
+        ax: { taskGroupRef: { name: "kagent-default" }, snapshotLocationOverride: "gs://snapshots/kagent/" },
       },
     },
   },
@@ -635,7 +545,7 @@ export const mockHarnesses: Harness[] = [
       spec: {
         claude: {},
         workload: { image: "ghcr.io/kagent-dev/kagent/claude-adk@sha256:9b2a4c8d1e7f0b3a6c9d2e5f8a3f1c9d2e5b7a48e0a1c6d9f2b4e8a7c30d5f6e" },
-        substrate: { workerPoolRef: { name: "kagent-default" }, snapshotPolicy: { location: "gs://snapshots/kagent/" } },
+        ax: { taskGroupRef: { name: "kagent-default" }, snapshotLocationOverride: "gs://snapshots/kagent/" },
       },
     },
   },
@@ -653,7 +563,7 @@ export const mockHarnesses: Harness[] = [
       spec: {
         codex: {},
         workload: { image: "ghcr.io/kagent-dev/kagent/codex-adk@sha256:4e8a7c30d5f6e9b2a4c8d1e7f0b3a6c9d2e5f8a3f1c9d2e5b7a48e0a1c6d9f2b" },
-        substrate: { workerPoolRef: { name: "kagent-default" }, snapshotPolicy: { location: "gs://snapshots/kagent/" } },
+        ax: { taskGroupRef: { name: "kagent-default" }, snapshotLocationOverride: "gs://snapshots/kagent/" },
       },
     },
   },
@@ -677,7 +587,7 @@ export const mockHarnesses: Harness[] = [
           command: ["/app/echo-agent"],
           args: ["--port=8080"],
         },
-        substrate: { workerPoolRef: { name: "kagent-default" }, snapshotPolicy: { location: "gs://snapshots/kagent/" } },
+        ax: { taskGroupRef: { name: "kagent-default" }, snapshotLocationOverride: "gs://snapshots/kagent/" },
       },
     },
   },
@@ -695,7 +605,7 @@ export const mockHarnesses: Harness[] = [
       spec: {
         kagent: {},
         workload: { image: "ghcr.io/kagent-dev/kagent/golang-adk@sha256:6e9b2a4c8d1e7f0b3a6c9d2e5f8a3f1c9d2e5b7a48e0a1c6d9f2b4e8a7c30d5f" },
-        substrate: { workerPoolRef: { name: "kagent-default" }, snapshotPolicy: { location: "gs://snapshots/kagent/" } },
+        ax: { taskGroupRef: { name: "kagent-default" }, snapshotLocationOverride: "gs://snapshots/kagent/" },
       },
     },
   },
@@ -849,7 +759,7 @@ const INLINE_HARNESS: HarnessSpec = {
   workload: {
     image: "ghcr.io/kagent-dev/kagent/claude-adk@sha256:9b2a4c8d1e7f0b3a6c9d2e5f8a3f1c9d2e5b7a48e0a1c6d9f2b4e8a7c30d5f6e",
   },
-  substrate: { workerPoolRef: { name: "kagent-default" }, snapshotPolicy: { location: "gs://snapshots/kagent/" } },
+  ax: { taskGroupRef: { name: "kagent-default" }, snapshotLocationOverride: "gs://snapshots/kagent/" },
 };
 
 /** Every template/harness combination: ref+ref, inline+ref, ref+inline, inline+inline. */

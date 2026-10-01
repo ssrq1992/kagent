@@ -3,7 +3,7 @@ package grpcserver
 import (
 	"testing"
 
-	guestpb "github.com/agent-substrate/env/proto/ateenv/v1alpha"
+	guestpb "github.com/google/ax/pkg/apis/v1alpha1"
 	apiv1alpha1 "github.com/kagent-dev/kagent/go/api/gen/kagent/api/v1alpha1"
 	pkgauth "github.com/kagent-dev/kagent/go/core/pkg/auth"
 	"google.golang.org/grpc/codes"
@@ -87,12 +87,12 @@ func TestReadOnlyShareCannotRenameAConversation(t *testing.T) {
 func TestSandboxGuestPoliciesMatchTheirEffect(t *testing.T) {
 	policies := DefaultMethodPolicies()
 	for method, expected := range map[string]pkgauth.AccessMode{
-		guestpb.ProcessService_StartProcess_FullMethodName:         pkgauth.AccessCreate,
-		guestpb.ProcessService_GetProcess_FullMethodName:           pkgauth.AccessRead,
-		guestpb.ProcessService_KillProcess_FullMethodName:          pkgauth.AccessUpdate,
-		guestpb.ProcessService_StreamProcessOutputs_FullMethodName: pkgauth.AccessRead,
-		guestpb.FileSystemService_ReadFile_FullMethodName:          pkgauth.AccessRead,
-		guestpb.FileSystemService_WriteFile_FullMethodName:         pkgauth.AccessUpdate,
+		guestpb.TaskExecutionService_StartProcess_FullMethodName:         pkgauth.AccessCreate,
+		guestpb.TaskExecutionService_GetProcess_FullMethodName:           pkgauth.AccessRead,
+		guestpb.TaskExecutionService_KillProcess_FullMethodName:          pkgauth.AccessUpdate,
+		guestpb.TaskExecutionService_StreamProcessOutputs_FullMethodName: pkgauth.AccessRead,
+		guestpb.TaskExecutionService_ReadFile_FullMethodName:             pkgauth.AccessRead,
+		guestpb.TaskExecutionService_WriteFile_FullMethodName:            pkgauth.AccessUpdate,
 	} {
 		t.Run(method, func(t *testing.T) {
 			if actual, ok := policies[method]; !ok || actual != expected {

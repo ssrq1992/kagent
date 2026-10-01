@@ -223,7 +223,7 @@ function AgentForm({ agent }: { agent?: Agent }) {
       <SourceSection
         kind="harness"
         title="Harness"
-        summary="How and where the agent runs: its runtime, image and worker pool."
+        summary="How and where the agent runs: its runtime, image and TaskGroup."
         source={harnessSource}
         onSource={setHarnessSource}
         reference={
@@ -238,7 +238,7 @@ function AgentForm({ agent }: { agent?: Agent }) {
         }
         inline={
           <Form layout="vertical">
-            <HarnessFields draft={harnessDraft} onChange={setHarnessDraft} />
+            <HarnessFields namespace={namespace} draft={harnessDraft} onChange={setHarnessDraft} />
           </Form>
         }
       />

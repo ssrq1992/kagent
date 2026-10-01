@@ -20,8 +20,7 @@ export type NavKey =
   | "agents"
   | "models"
   | "mcpServers"
-  | "prompts"
-  | "substrate";
+  | "prompts";
 
 export const navLabels: Record<NavKey, string> = {
   dashboard: "Dashboard",
@@ -29,7 +28,6 @@ export const navLabels: Record<NavKey, string> = {
   models: "Models",
   mcpServers: "MCP Servers",
   prompts: "Prompts",
-  substrate: "Substrate",
 };
 
 /** Clicks a sidebar entry and waits for the route to change. */

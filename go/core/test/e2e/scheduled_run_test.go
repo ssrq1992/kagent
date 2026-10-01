@@ -10,7 +10,6 @@ import (
 	"net/http/httptest"
 	"net/http/httputil"
 	"net/url"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -19,7 +18,6 @@ import (
 	a2atype "github.com/a2aproject/a2a-go/v2/a2a"
 	a2apb "github.com/a2aproject/a2a-go/v2/a2apb/v1"
 	"github.com/a2aproject/a2a-go/v2/a2apb/v1/pbconv"
-	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"github.com/google/uuid"
 	apiv1alpha1 "github.com/kagent-dev/kagent/go/api/gen/kagent/api/v1alpha1"
 	"github.com/stretchr/testify/require"
@@ -290,35 +288,17 @@ func (f *scheduledFixture) assertQuiescent(t *testing.T, execution *apiv1alpha1.
 	t.Helper()
 	result, err := f.sessions.GetSession(f.ctx, &apiv1alpha1.GetSessionRequest{SessionId: execution.GetSessionId()})
 	require.NoError(t, err)
-	// The public A2A authority identifies the Actor without reading internal DB state.
-	actorName, rest, _ := strings.Cut(result.GetSession().GetA2AAuthority(), ".")
-	atespace, _, _ := strings.Cut(rest, ".")
-	require.NotEmpty(t, atespace)
-	require.NotEmpty(t, actorName)
+	runtime := newAXRuntimeClient(t)
+	session := result.GetSession()
 	require.NoError(t, wait.PollUntilContextTimeout(f.ctx, time.Second, 30*time.Second, true, func(ctx context.Context) (bool, error) {
-		for token := ""; ; {
-			page, err := f.system.ListSubstrateActors(ctx, &apiv1alpha1.ListSubstrateActorsRequest{
-				Atespace: atespace,
-				Page:     &apiv1alpha1.PageRequest{Limit: 100, PageToken: token},
-			})
-			if err != nil {
-				return false, err
-			}
-			if page.GetAteApiError() != "" {
-				return false, fmt.Errorf("Substrate actors: %s", page.GetAteApiError())
-			}
-			for _, actor := range page.GetActors() {
-				if actor.GetMetadata().GetName() == actorName && actor.GetMetadata().GetAtespace() == atespace {
-					state := actor.GetStatus().GetState()
-					return state == ateapipb.ActorState_ACTOR_STATE_SUSPENDED || state == ateapipb.ActorState_ACTOR_STATE_PAUSED, nil
-				}
-			}
-			token = page.GetPage().GetNextPageToken()
-			if token == "" {
-				return false, nil
-			}
+		task, err := findAXTask(ctx, runtime, session.GetAgent().GetNamespace(), "session-"+session.GetId())
+		if err != nil || task == nil {
+			return false, err
 		}
-	}), "scheduled Actor %s should release its worker", actorName)
+		require.Equal(t, session.GetA2AAuthority(), task.GetMetadata().GetUid())
+		phase := task.GetStatus().GetRuntimeStatus().GetPhase()
+		return phase == "Suspended" || phase == "Paused", nil
+	}), "scheduled AX Task should become quiescent")
 }
 
 func startScheduledRecoveryModel(t *testing.T) (string, <-chan struct{}, func(), *atomic.Int32) {

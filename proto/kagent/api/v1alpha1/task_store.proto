@@ -11,6 +11,8 @@ option go_package = "github.com/kagent-dev/kagent/go/api/gen/kagent/api/v1alpha1
 // requires workload authority for the requested session. Public user and share
 // credentials do not grant access to this service.
 service TaskStoreService {
+  // Resolves the current AX workload identity; never cache across snapshot restore.
+  rpc ResolveSession(TaskStoreServiceResolveSessionRequest) returns (TaskStoreServiceResolveSessionResponse);
   // CreateTask persists a new SDK task. Retrying the same task and payload
   // returns its original version; a different creation with that ID conflicts.
   rpc CreateTask(TaskStoreServiceCreateTaskRequest) returns (TaskStoreServiceCreateTaskResponse);
@@ -92,3 +94,6 @@ message TaskStoreServiceSettleTaskRequest {
 }
 
 message TaskStoreServiceSettleTaskResponse {}
+
+message TaskStoreServiceResolveSessionRequest {}
+message TaskStoreServiceResolveSessionResponse { string session_id = 1; }

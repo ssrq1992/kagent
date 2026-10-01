@@ -92,3 +92,13 @@ class TaskStoreServiceSettleTaskRequest(_message.Message):
 class TaskStoreServiceSettleTaskResponse(_message.Message):
     __slots__ = ()
     def __init__(self) -> None: ...
+
+class TaskStoreServiceResolveSessionRequest(_message.Message):
+    __slots__ = ()
+    def __init__(self) -> None: ...
+
+class TaskStoreServiceResolveSessionResponse(_message.Message):
+    __slots__ = ("session_id",)
+    SESSION_ID_FIELD_NUMBER: _ClassVar[int]
+    session_id: str
+    def __init__(self, session_id: _Optional[str] = ...) -> None: ...

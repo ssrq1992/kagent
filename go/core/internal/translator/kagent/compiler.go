@@ -54,8 +54,8 @@ func (c *Compiler) Compile(ctx context.Context, input *v2translator.HarnessInput
 	environment = append(environment,
 		corev1.EnvVar{Name: env.KagentName.Name(), Value: input.AgentName},
 		corev1.EnvVar{Name: env.KagentNamespace.Name(), Value: template.Namespace},
-		corev1.EnvVar{Name: env.KagentAPIURL.Name(), Value: fmt.Sprintf("http://%s.%s:8083", utils.GetControllerName(), utils.GetResourceNamespace())},
-		corev1.EnvVar{Name: env.KagentGatewayURL.Name(), Value: fmt.Sprintf("http://%s.%s:8083", utils.GetControllerName(), utils.GetResourceNamespace())},
+		corev1.EnvVar{Name: env.KagentAPIURL.Name(), Value: fmt.Sprintf("https://%s.%s:8083", utils.GetControllerName(), utils.GetResourceNamespace())},
+		corev1.EnvVar{Name: env.KagentGatewayURL.Name(), Value: fmt.Sprintf("https://%s.%s:8083", utils.GetControllerName(), utils.GetResourceNamespace())},
 		corev1.EnvVar{Name: env.KagentPort.Name(), Value: "80"},
 	)
 	environment = append(environment, telemetryConfig.TelemetryEnvironment(tracing.RuntimeTelemetry{
@@ -78,7 +78,7 @@ func (c *Compiler) Compile(ctx context.Context, input *v2translator.HarnessInput
 		Namespace: template.Namespace,
 		Image:     harness.Spec.Workload.Image, Command: slices.Clone(harness.Spec.Workload.Command), Args: slices.Clone(harness.Spec.Workload.Args),
 		Environment: environment, ConfigJSON: configJSON, AgentCard: card,
-		WorkerPoolName: harness.Spec.Substrate.WorkerPoolRef.Name, SnapshotLocation: harness.Spec.Substrate.SnapshotPolicy.Location,
+		TaskGroupName: harness.Spec.AX.TaskGroupRef.Name, SnapshotLocation: harness.Spec.AX.SnapshotLocationOverride,
 		Credentials: credentials, Provenance: provenance, EgressDestinations: compiled.Egress,
 	}}, nil
 }

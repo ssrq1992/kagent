@@ -34,20 +34,12 @@ import type {
   UpdatePromptTemplateRequest,
 } from "./domain/prompts";
 import type { NamespaceResponse } from "./domain/namespaces";
-import type {
-  SubstrateActorPage,
-  SubstrateSummary,
-  SubstrateWorkerPage,
-} from "./domain/substrate";
 import type { Harness, HarnessResource } from "./domain/harnesses";
 import type {
   AgentTemplate,
   AgentTemplateResource,
 } from "./domain/agentTemplates";
 import type {
-  SubstrateActorPageInput,
-  SubstrateWorkerPageInput,
-  SubstrateScopeInput,
 } from "./operations";
 import type {
   AgentInstance,
@@ -107,19 +99,8 @@ export interface NamespacesApi {
   list(options?: ReadOptions): Promise<NamespaceResponse[]>;
 }
 
-export interface SubstrateApi {
-  /** Counts and the two small lists. The only honest source of a total. */
-  summary(scope?: SubstrateScopeInput, options?: ReadOptions): Promise<SubstrateSummary>;
-  /** One page of actors, ordered and narrowed server-side across the whole inventory. */
-  actors(
-    input: SubstrateActorPageInput,
-    options?: ReadOptions,
-  ): Promise<SubstrateActorPage>;
-  /** One page of workers. The mirror of `actors`. */
-  workers(
-    input: SubstrateWorkerPageInput,
-    options?: ReadOptions,
-  ): Promise<SubstrateWorkerPage>;
+export interface TaskGroupsApi {
+  list(input: import("./operations").TaskGroupPageInput, options?: ReadOptions): Promise<import("./domain/taskGroups").TaskGroupPage>;
 }
 
 /** The two halves an AgentInstance is created from. */
@@ -284,7 +265,7 @@ export interface KagentApiClient {
   mcpServers: McpServersApi;
   prompts: PromptsApi;
   namespaces: NamespacesApi;
-  substrate: SubstrateApi;
+  taskGroups: TaskGroupsApi;
   agentInstances: AgentInstancesApi;
   agentBuildingBlocks: AgentBuildingBlocksApi;
 }
@@ -327,14 +308,8 @@ export function createApiClient(): KagentApiClient {
       list: (options) => invoke("namespaces.list", {}, options),
     },
 
-    substrate: {
-      summary: (scope = {}, options) =>
-        invoke("substrate.summary", scope, options),
-      // Not sorted here, unlike every other list: the server orders these pages across
-      // the whole inventory, and re-sorting a page would order it within itself while
-      // leaving it in the wrong place in the whole.
-      actors: (input, options) => invoke("substrate.actors", input, options),
-      workers: (input, options) => invoke("substrate.workers", input, options),
+    taskGroups: {
+      list: (input, options) => invoke("taskGroups.list", input, options),
     },
 
     agentBuildingBlocks: {

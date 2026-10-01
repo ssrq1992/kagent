@@ -159,7 +159,7 @@ func discoverHTTPAgent(t *testing.T, fixture *interactionFixture) (*a2aclient.Cl
 	t.Helper()
 	target := interactionTarget(t)
 	request, err := http.NewRequestWithContext(fixture.ctx, http.MethodGet,
-		"http://"+target+"/agents/"+fixture.tenant+a2asrv.WellKnownAgentCardPath, nil)
+		"https://"+target+"/agents/"+fixture.tenant+a2asrv.WellKnownAgentCardPath, nil)
 	require.NoError(t, err)
 	request.Header.Set("X-User-Id", "e2e")
 	response, err := http.DefaultClient.Do(request)

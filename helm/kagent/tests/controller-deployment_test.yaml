@@ -7,7 +7,6 @@ tests:
   - it: keeps chart defaults in the ConfigMap and pod identity and credentials in env
     template: controller-deployment.yaml
     set:
-      controller.substrate.enabled: true
       controller.metrics.enabled: true
     asserts:
       - contains:
@@ -137,54 +136,12 @@ tests:
             controller-key: "controller-value"
             shared-key: "controller-wins"
 
-  - it: should configure substrate ate-api mTLS when substrate is enabled
-    template: controller-deployment.yaml
-    set:
-      controller:
-        substrate:
-          enabled: true
-          ateApiEndpoint: "dns:///api.ate-system.svc:443"
-    asserts:
-      - equal:
-          path: data.KAGENT_SUBSTRATE_ATE_API_ENDPOINT
-          value: "dns:///api.ate-system.svc:443"
-        template: controller-configmap.yaml
-      - equal:
-          path: data.KAGENT_SUBSTRATE_ATE_API_CA_FILE
-          value: /run/substrate-servicedns/trust-bundle.pem
-        template: controller-configmap.yaml
-      - equal:
-          path: data.KAGENT_SUBSTRATE_ATE_API_CLIENT_CERT_FILE
-          value: /run/substrate-podidentity/credential-bundle.pem
-        template: controller-configmap.yaml
-      - equal:
-          path: spec.template.spec.volumes[0].name
-          value: substrate-servicedns
-      - equal:
-          path: spec.template.spec.volumes[0].projected.sources[0].clusterTrustBundle.signerName
-          value: servicedns.podcert.ate.dev/identity
-      - equal:
-          path: spec.template.spec.volumes[1].projected.sources[0].podCertificate.signerName
-          value: podidentity.podcert.ate.dev/identity
-      - equal:
-          path: spec.template.spec.volumes[1].projected.sources[0].podCertificate.credentialBundlePath
-          value: credential-bundle.pem
-      - equal:
-          path: spec.template.spec.containers[0].volumeMounts[0].name
-          value: substrate-servicedns
-      - equal:
-          path: spec.template.spec.containers[0].volumeMounts[0].mountPath
-          value: /run/substrate-servicedns
-      - equal:
-          path: spec.template.spec.containers[0].volumeMounts[1].mountPath
-          value: /run/substrate-podidentity
-
   - it: should set KAGENT_GATEWAY_URL with computed default value
     template: controller-configmap.yaml
     asserts:
       - equal:
           path: data.KAGENT_GATEWAY_URL
-          value: "http://RELEASE-NAME-controller.NAMESPACE.svc:8083"
+          value: "https://RELEASE-NAME-controller.NAMESPACE.svc:8083"
 
   - it: should set KAGENT_GATEWAY_URL with custom value when explicitly set
     template: controller-configmap.yaml
@@ -570,18 +527,6 @@ tests:
           content:
             name: extra-data
             mountPath: /extra
-
-  - it: should not render volumes or volumeMounts sections when none are configured
-    template: controller-deployment.yaml
-    asserts:
-      - isNull:
-          path: spec.template.spec.volumes
-      - isNull:
-          path: spec.template.spec.containers[0].volumeMounts
-
-  # =============================================================================
-  # Database Configuration Tests
-  # =============================================================================
 
   - it: should set POSTGRES_PASSWORD from secret and KAGENT_POSTGRES_DATABASE_URL with bundled connection string by default
     template: controller-deployment.yaml

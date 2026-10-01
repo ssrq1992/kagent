@@ -2,7 +2,9 @@ package e2e_test
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
+	"google.golang.org/grpc/credentials"
 	"net"
 	"sync/atomic"
 	"testing"
@@ -20,7 +22,7 @@ import (
 
 func newControllerConn(t *testing.T, target string) *grpc.ClientConn {
 	t.Helper()
-	conn, err := grpc.NewClient(target, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient(target, grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{MinVersion: tls.VersionTLS12})))
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, conn.Close()) })
 	require.NoError(t, waitForControllerAPI(t.Context(), conn), "controller API %s did not become reachable", target)

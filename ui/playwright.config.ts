@@ -147,7 +147,7 @@ export default defineConfig({
   use: {
     trace: "on-first-retry",
     screenshot: "only-on-failure",
-    video: "retain-on-failure",
+    video: process.env.KAGENT_E2E_DISABLE_VIDEO === "true" ? "off" : "retain-on-failure",
   },
   projects: LIVE
     ? [
@@ -156,6 +156,7 @@ export default defineConfig({
           testDir: "./playwright/live",
           use: {
             ...devices["Desktop Chrome"],
+        ...(process.env.KAGENT_E2E_BROWSER_CHANNEL ? { channel: process.env.KAGENT_E2E_BROWSER_CHANNEL } : {}),
             baseURL: LIVE_BASE_URL,
             // Worth keeping for a live failure: unlike the mock suite there is
             // no fixed fixture to re-read, so the trace is the only record of what
@@ -168,7 +169,8 @@ export default defineConfig({
         {
           name: "chromium",
           testIgnore: EXTENSION_SPECS,
-          use: { ...devices["Desktop Chrome"], baseURL: BASE_URL },
+          use: { ...devices["Desktop Chrome"],
+        ...(process.env.KAGENT_E2E_BROWSER_CHANNEL ? { channel: process.env.KAGENT_E2E_BROWSER_CHANNEL } : {}), baseURL: BASE_URL },
         },
         {
           // The same suite in a second engine, against the same server.
@@ -188,7 +190,8 @@ export default defineConfig({
         {
           name: "chromium-with-extension",
           testMatch: EXTENSION_SPECS,
-          use: { ...devices["Desktop Chrome"], baseURL: EXTENSION_BASE_URL },
+          use: { ...devices["Desktop Chrome"],
+        ...(process.env.KAGENT_E2E_BROWSER_CHANNEL ? { channel: process.env.KAGENT_E2E_BROWSER_CHANNEL } : {}), baseURL: EXTENSION_BASE_URL },
         },
       ],
   // Never adopt a server this config did not start. Adopting one skips the `env`

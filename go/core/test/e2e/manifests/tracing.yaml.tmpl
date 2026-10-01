@@ -13,11 +13,9 @@ spec:
   # reach the receiver only through the explicit pre-suspension ForceFlush.
   - name: OTEL_BSP_SCHEDULE_DELAY
     value: "3600000"
-  substrate:
-    workerPoolRef:
+  ax:
+    taskGroupRef:
       name: kagent-default
-    snapshotPolicy:
-      location: gs://ate-snapshots/kagent/
 ---
 apiVersion: api.kagent.dev/v1alpha3
 kind: Harness
@@ -31,8 +29,6 @@ spec:
   env:
   - name: OTEL_BSP_SCHEDULE_DELAY
     value: "3600000"
-  substrate:
-    workerPoolRef:
+  ax:
+    taskGroupRef:
       name: kagent-default
-    snapshotPolicy:
-      location: gs://ate-snapshots/kagent/

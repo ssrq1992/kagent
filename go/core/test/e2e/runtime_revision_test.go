@@ -2,18 +2,16 @@ package e2e_test
 
 import (
 	"context"
-	"fmt"
+	ax "github.com/google/ax/pkg/apis/v1alpha1"
 	"strings"
 	"testing"
 	"time"
 
 	a2atype "github.com/a2aproject/a2a-go/v2/a2a"
 	a2apb "github.com/a2aproject/a2a-go/v2/a2apb/v1"
-	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"github.com/google/uuid"
 	apiv1alpha1 "github.com/kagent-dev/kagent/go/api/gen/kagent/api/v1alpha1"
 	"github.com/kagent-dev/kagent/go/api/v1alpha3"
-	"github.com/kagent-dev/kagent/go/core/internal/substrate"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
@@ -23,7 +21,7 @@ import (
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// TestRuntimeRevisionLifecycle exercises actual Substrate runtimes through
+// TestRuntimeRevisionLifecycle exercises actual AX runtimes through
 // invalid edits, template retirement, checkpoint retention, and later preparation.
 func TestRuntimeRevisionLifecycle(t *testing.T) {
 	t.Parallel()
@@ -39,7 +37,7 @@ func TestRuntimeRevisionLifecycle(t *testing.T) {
 		t.Cleanup(cancel)
 		sessions := apiv1alpha1.NewSessionServiceClient(conn)
 		checkpoints := apiv1alpha1.NewCheckpointServiceClient(conn)
-		system := apiv1alpha1.NewSystemServiceClient(conn)
+		runtime := newAXRuntimeClient(t)
 		request := func(name string) *apiv1alpha1.CreateSessionRequest {
 			return &apiv1alpha1.CreateSessionRequest{
 				Agent:     &apiv1alpha1.ResourceReference{Namespace: "kagent", Name: name},
@@ -73,24 +71,15 @@ func TestRuntimeRevisionLifecycle(t *testing.T) {
 		t.Cleanup(func() { deleteSession(source.GetId()) })
 		sourceTaskID := send(source.GetId())
 
-		// Observe the actual runtime through the public inventory API before deleting
-		// references, so an empty response cannot falsely prove cleanup later.
-		actor, err := findSubstrateActor(ctx, system, "", substrate.ActorName(source.GetId()))
+		// Observe immutable AX identities before releasing business references.
+		task, err := findAXTask(ctx, runtime, source.GetAgent().GetNamespace(), "session-"+source.GetId())
 		require.NoError(t, err)
-		require.NotNil(t, actor)
-		runtimeName := actor.GetActorTemplate().GetName()
-		runtimeNamespace := actor.GetActorTemplate().GetAtespace()
-		require.NotEmpty(t, runtimeName)
-		backend, err := system.GetSubstrateSummary(ctx, &apiv1alpha1.GetSubstrateSummaryRequest{Namespace: "kagent", Atespace: runtimeNamespace})
+		require.NotNil(t, task)
+		runtimeRef := task.GetSpec().GetPreparedRuntimeRef()
+		require.NotEmpty(t, runtimeRef.GetUid())
+		prepared, err := runtime.GetPreparedRuntime(ctx, &ax.GetPreparedRuntimeRequest{Ref: runtimeRef})
 		require.NoError(t, err)
-		require.Empty(t, backend.GetAteApiError())
-		var goldenActorID string
-		for _, actorTemplate := range backend.GetActorTemplates() {
-			if actorTemplate.GetMetadata().GetAtespace() == runtimeNamespace && actorTemplate.GetMetadata().GetName() == runtimeName {
-				goldenActorID = actorTemplate.GetMetadata().GetUid()
-			}
-		}
-		require.NotEmpty(t, goldenActorID)
+		require.Equal(t, "Ready", prepared.GetPhase())
 
 		template := &v1alpha3.AgentTemplate{}
 		require.NoError(t, kube.Get(ctx, ctrlclient.ObjectKey{Namespace: "kagent", Name: templateName}, template))
@@ -156,18 +145,11 @@ func TestRuntimeRevisionLifecycle(t *testing.T) {
 		// GC must remove the template after the final
 		// checkpoint disappears, without another template event to drive cleanup.
 		require.NoError(t, wait.PollUntilContextTimeout(ctx, time.Second, 3*time.Minute, true, func(ctx context.Context) (bool, error) {
-			backend, err := system.GetSubstrateSummary(ctx, &apiv1alpha1.GetSubstrateSummaryRequest{Namespace: "kagent", Atespace: runtimeNamespace})
-			if err != nil {
-				return false, err
+			_, err := runtime.GetPreparedRuntime(ctx, &ax.GetPreparedRuntimeRequest{Ref: runtimeRef})
+			if status.Code(err) == codes.NotFound {
+				return true, nil
 			}
-			require.Empty(t, backend.GetAteApiError())
-			for _, actorTemplate := range backend.GetActorTemplates() {
-				if actorTemplate.GetMetadata().GetAtespace() == runtimeNamespace && actorTemplate.GetMetadata().GetName() == runtimeName {
-					return false, nil
-				}
-			}
-			actor, err := findSubstrateActor(ctx, system, "ate-golden", goldenActorID)
-			return actor == nil, err
+			return false, err
 		}), "final checkpoint deletion must eventually collect its runtime without template changes")
 
 		// Recreating the name must prepare a new identity after collection.
@@ -182,28 +164,4 @@ func TestRuntimeRevisionLifecycle(t *testing.T) {
 		t.Cleanup(func() { deleteSession(nextSession.GetSession().GetId()) })
 		send(nextSession.GetSession().GetId())
 	})
-}
-
-func findSubstrateActor(ctx context.Context, system apiv1alpha1.SystemServiceClient, atespace, name string) (*ateapipb.Actor, error) {
-	for token := ""; ; {
-		page, err := system.ListSubstrateActors(ctx, &apiv1alpha1.ListSubstrateActorsRequest{
-			Atespace: atespace,
-			Page:     &apiv1alpha1.PageRequest{Limit: 100, PageToken: token},
-		})
-		if err != nil {
-			return nil, err
-		}
-		if page.GetAteApiError() != "" {
-			return nil, fmt.Errorf("Substrate actors: %s", page.GetAteApiError())
-		}
-		for _, actor := range page.GetActors() {
-			if actor.GetMetadata().GetName() == name {
-				return actor, nil
-			}
-		}
-		token = page.GetPage().GetNextPageToken()
-		if token == "" {
-			return nil, nil
-		}
-	}
 }

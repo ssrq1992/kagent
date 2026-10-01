@@ -9,7 +9,6 @@ import (
 
 	a2apb "github.com/a2aproject/a2a-go/v2/a2apb/v1"
 	"github.com/google/uuid"
-	apia2a "github.com/kagent-dev/kagent/go/api/a2a"
 	apiv1alpha1 "github.com/kagent-dev/kagent/go/api/gen/kagent/api/v1alpha1"
 	"github.com/kagent-dev/kagent/go/core/internal/database"
 	"github.com/kagent-dev/kagent/go/core/internal/service/serviceerrors"
@@ -249,7 +248,7 @@ func TestA2AShareAuthorizationIsDelegatedToGateway(t *testing.T) {
 func TestInsecureRuntimeIdentityDoesNotAuthorizePublicAPI(t *testing.T) {
 	const runtimeMethod = "/test.TaskStore/Get"
 	policies := MethodPolicies{runtimeMethod: pkgauth.AccessRuntime, readMethod: pkgauth.AccessRead}
-	ctx := metadata.NewIncomingContext(t.Context(), metadata.Pairs(apia2a.InsecureRuntimeIdentityHeader, "team-a/session-"+uuid.NewString()+"/actor-uid"))
+	ctx := metadata.NewIncomingContext(t.Context(), metadata.Pairs("x-kagent-insecure-runtime-identity", "team-a/session-"+uuid.NewString()+"/actor-uid"))
 	public := &testAuthenticator{err: errors.New("public credentials required")}
 	for _, method := range []string{runtimeMethod, readMethod} {
 		_, err := authenticate(ctx, method, public, nil, nil, policies)
@@ -262,8 +261,8 @@ func TestInsecureRuntimeIdentityDoesNotAuthorizePublicAPI(t *testing.T) {
 		t.Fatalf("runtime test mode authorized public API: %v", err)
 	}
 	_, err = authenticate(ctx, runtimeMethod, public, &taskstore.Authenticator{}, nil, policies)
-	if err != nil {
-		t.Fatalf("explicit runtime test mode rejected identity: %v", err)
+	if status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("unsigned runtime identity must be rejected: %v", err)
 	}
 }
 

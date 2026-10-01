@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"io"
 
-	guestpb "github.com/agent-substrate/env/proto/ateenv/v1alpha"
+	guestpb "github.com/google/ax/pkg/apis/v1alpha1"
 	apiv1alpha1 "github.com/kagent-dev/kagent/go/api/gen/kagent/api/v1alpha1"
 	sandboxapi "github.com/kagent-dev/kagent/go/api/sandbox"
 	"google.golang.org/grpc"
@@ -107,7 +107,7 @@ func (c *SandboxClient) StartProcess(ctx context.Context, sandboxID string, requ
 		return nil, err
 	}
 	defer cancel()
-	return guestpb.NewProcessServiceClient(conn).StartProcess(ctx, request)
+	return guestpb.NewTaskExecutionServiceClient(conn).StartProcess(ctx, request)
 }
 
 func (c *SandboxClient) GetProcess(ctx context.Context, sandboxID string, request *guestpb.GetProcessRequest) (*guestpb.Process, error) {
@@ -116,7 +116,7 @@ func (c *SandboxClient) GetProcess(ctx context.Context, sandboxID string, reques
 		return nil, err
 	}
 	defer cancel()
-	return guestpb.NewProcessServiceClient(conn).GetProcess(ctx, request)
+	return guestpb.NewTaskExecutionServiceClient(conn).GetProcess(ctx, request)
 }
 
 func (c *SandboxClient) KillProcess(ctx context.Context, sandboxID string, request *guestpb.KillProcessRequest) (*guestpb.KillProcessResponse, error) {
@@ -125,7 +125,7 @@ func (c *SandboxClient) KillProcess(ctx context.Context, sandboxID string, reque
 		return nil, err
 	}
 	defer cancel()
-	return guestpb.NewProcessServiceClient(conn).KillProcess(ctx, request)
+	return guestpb.NewTaskExecutionServiceClient(conn).KillProcess(ctx, request)
 }
 
 // ReadProcessOutputs drains the upstream stream. The caller owns continuation
@@ -136,7 +136,7 @@ func (c *SandboxClient) ReadProcessOutputs(ctx context.Context, sandboxID string
 		return err
 	}
 	defer cancel()
-	stream, err := guestpb.NewProcessServiceClient(conn).StreamProcessOutputs(ctx, request)
+	stream, err := guestpb.NewTaskExecutionServiceClient(conn).StreamProcessOutputs(ctx, request)
 	if err != nil {
 		return err
 	}
@@ -160,7 +160,7 @@ func (c *SandboxClient) ReadFile(ctx context.Context, sandboxID, path string, ou
 		return err
 	}
 	defer cancel()
-	stream, err := guestpb.NewFileSystemServiceClient(conn).ReadFile(ctx, &guestpb.ReadFileRequest{Path: path})
+	stream, err := guestpb.NewTaskExecutionServiceClient(conn).ReadFile(ctx, &guestpb.ReadFileRequest{Path: path})
 	if err != nil {
 		return err
 	}
@@ -190,7 +190,7 @@ func (c *SandboxClient) WriteFile(ctx context.Context, sandboxID, path string, m
 		return nil, err
 	}
 	defer cancel()
-	stream, err := guestpb.NewFileSystemServiceClient(conn).WriteFile(ctx)
+	stream, err := guestpb.NewTaskExecutionServiceClient(conn).WriteFile(ctx)
 	if err != nil {
 		return nil, err
 	}

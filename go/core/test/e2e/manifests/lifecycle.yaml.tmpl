@@ -7,11 +7,9 @@ spec:
   kagent: {}
   workload:
     image: ${KAGENT_E2E_RUNTIME_IMAGE}
-  substrate:
-    workerPoolRef:
+  ax:
+    taskGroupRef:
       name: kagent-default
-    snapshotPolicy:
-      location: gs://ate-snapshots/kagent/
 ---
 apiVersion: api.kagent.dev/v1alpha3
 kind: Harness
@@ -22,11 +20,9 @@ spec:
   codex: {}
   workload:
     image: ${KAGENT_E2E_CODEX_IMAGE}
-  substrate:
-    workerPoolRef:
+  ax:
+    taskGroupRef:
       name: kagent-default
-    snapshotPolicy:
-      location: gs://ate-snapshots/kagent/
 ---
 apiVersion: api.kagent.dev/v1alpha3
 kind: Harness
@@ -38,11 +34,9 @@ spec:
   workload:
     image: ${KAGENT_E2E_BYO_IMAGE}
     command: ["/app"]
-  substrate:
-    workerPoolRef:
+  ax:
+    taskGroupRef:
       name: kagent-default
-    snapshotPolicy:
-      location: gs://ate-snapshots/kagent/
 ---
 apiVersion: api.kagent.dev/v1alpha3
 kind: Harness
@@ -57,11 +51,9 @@ spec:
   env:
   - name: KAGENT_PORT
     value: "80"
-  substrate:
-    workerPoolRef:
+  ax:
+    taskGroupRef:
       name: kagent-default
-    snapshotPolicy:
-      location: gs://ate-snapshots/kagent/
 ---
 apiVersion: api.kagent.dev/v1alpha3
 kind: Harness
@@ -72,11 +64,9 @@ spec:
   claude: {}
   workload:
     image: ${KAGENT_E2E_CLAUDE_IMAGE}
-  substrate:
-    workerPoolRef:
+  ax:
+    taskGroupRef:
       name: kagent-default
-    snapshotPolicy:
-      location: gs://ate-snapshots/kagent/
 ---
 apiVersion: api.kagent.dev/v1alpha3
 kind: AgentTemplate

@@ -107,8 +107,15 @@ This reference covers user-configurable settings for the controller, CLI, standa
 
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
+| `KAGENT_API_TLS_CERT_FILE` | String | `(none)` | Controller HTTPS certificate for AX runtime callbacks. |
+| `KAGENT_API_TLS_KEY_FILE` | String | `(none)` | Controller HTTPS private key for AX runtime callbacks. |
 | `KAGENT_AUTH_MODE` | String | `insecure` | Controller authentication mode: insecure or trusted-proxy. trusted-proxy requires an upstream credential-validating proxy and network isolation preventing bypass. |
 | `KAGENT_AUTH_USER_ID_CLAIM` | String | `(none)` | JWT claim used for the caller identity in trusted-proxy mode. Empty uses sub; a missing or empty custom claim falls back to sub. |
+| `KAGENT_AX_CA_FILE` | String | `(none)` | CA bundle for AX TLS verification; empty uses system trust roots. |
+| `KAGENT_AX_CLIENT_CERT_FILE` | String | `(none)` | PEM client certificate for AX mTLS. |
+| `KAGENT_AX_CLIENT_KEY_FILE` | String | `(none)` | PEM client private key for AX mTLS. |
+| `KAGENT_AX_ENDPOINT` | String | `dns:///ax.ax-system.svc:8443` | AX managed gRPC endpoint. |
+| `KAGENT_AX_SERVER_NAME` | String | `(none)` | Optional AX TLS server name override. |
 | `KAGENT_CONTROLLER_NAME` | String | `kagent-controller` | Name of the kagent controller service. |
 | `KAGENT_DATABASE_VECTOR_ENABLED` | Boolean | `false` | Enable vector database migrations and vector-backed database functionality. The controller defaults to false. When unset in the CLI, migrations read the controller ConfigMap and fall back to true if it is unavailable. |
 | `KAGENT_GATEWAY_URL` | String | `(none)` | Base URL for A2A and MCP traffic. The controller falls back to http://127.0.0.1:8083; Python runtimes require a value. |
@@ -126,16 +133,11 @@ This reference covers user-configurable settings for the controller, CLI, standa
 | `KAGENT_POSTGRES_DATABASE_URL_FILE` | String | `(none)` | File containing the PostgreSQL connection URL; takes precedence over KAGENT_POSTGRES_DATABASE_URL in the controller. |
 | `KAGENT_SANDBOX_CPU` | String | `1` | CPU limit for standalone sandbox runtimes. |
 | `KAGENT_SANDBOX_DEFAULT_TTL` | Duration | `1h0m0s` | Default standalone sandbox lifetime. |
-| `KAGENT_SANDBOX_GUEST_IMAGE` | String | `(none)` | Guest package image pinned by sha256 digest. Required for sandbox preparation and passed unchanged to Substrate. |
 | `KAGENT_SANDBOX_MAX_TTL` | Duration | `24h0m0s` | Maximum standalone sandbox lifetime, at most 24h. |
 | `KAGENT_SANDBOX_MEMORY` | String | `1Gi` | Memory limit for standalone sandbox runtimes. |
 | `KAGENT_SESSION_EXPIRATION_POLL_INTERVAL` | Duration | `1m0s` | Interval between idle session expiration sweeps. Must be positive. |
 | `KAGENT_SESSION_IDLE_TTL` | Duration | `168h0m0s` | Delete sessions after this idle duration. Zero disables expiration; running and waiting tasks are retained. |
 | `KAGENT_SKIP_MIGRATIONS` | Boolean | `false` | Verify required database migrations at startup without applying them. |
-| `KAGENT_SUBSTRATE_ATENET_ROUTER_URL` | String | `http://atenet-router.ate-system.svc:80` | Substrate router endpoint for agent and sandbox guest traffic. |
-| `KAGENT_SUBSTRATE_ATE_API_CA_FILE` | String | `(none)` | PEM CA bundle used to verify the Substrate API server. Empty uses system trust roots. |
-| `KAGENT_SUBSTRATE_ATE_API_CLIENT_CERT_FILE` | String | `(none)` | PEM bundle containing both the client certificate and private key for Substrate API mTLS. Reloaded for each TLS handshake. |
-| `KAGENT_SUBSTRATE_ATE_API_ENDPOINT` | String | `dns:///api.ate-system.svc:443` | Substrate control-plane gRPC endpoint. |
 | `KAGENT_WATCH_NAMESPACES` | String | `(none)` | Comma-separated namespaces to watch. Empty watches all namespaces. |
 | `KUBECONFIG` | String | `(none)` | Kubernetes client configuration file list for the controller, CLI Kubernetes operations, and tests. When unset, client-go uses its normal in-cluster or user kubeconfig discovery. |
 | `OTEL_EXPORTER_OTLP_COMPRESSION` | String | `gzip` | OTLP compression default applied by kagent. The native Codex process has this variable removed because its exporter does not support gzip. |
@@ -192,7 +194,7 @@ This reference covers user-configurable settings for the controller, CLI, standa
 | `KAGENT_E2E_RUN_ROLLING_UPGRADE_TESTS` | String | `false` | Run rolling upgrade integration tests when exactly true. |
 | `KAGENT_E2E_RUN_UPGRADE_TESTS` | String | `false` | Run upgrade integration tests when exactly true. |
 | `KAGENT_E2E_SANDBOX_NAMESPACE` | String | `kagent` | Namespace for sandbox E2E resources. |
-| `KAGENT_E2E_SANDBOX_WORKER_POOL` | String | `kagent-default` | Worker pool used by sandbox E2E resources. |
+| `KAGENT_E2E_SANDBOX_TASK_GROUP` | String | `kagent-default` | AX TaskGroup used by sandbox E2E resources. |
 | `KAGENT_E2E_UI_LOOP_EXTENSION_PORT` | String | `(none)` | Example-extension browser-test port. Defaults to KAGENT_E2E_UI_LOOP_PORT plus 50. |
 | `KAGENT_E2E_UI_LOOP_LIVE` | Boolean | `false` | Run UI browser tests against a real cluster when exactly true. |
 | `KAGENT_E2E_UI_LOOP_LIVE_PORT` | String | `8301` | Live-cluster UI browser-test port. |

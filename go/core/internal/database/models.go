@@ -59,17 +59,17 @@ type AgentDefinition struct {
 }
 
 type RuntimeRevision struct {
-	Revision              string
-	Namespace             string
-	AgentName             string
-	AgentUID              string
-	SourceSnapshot        json.RawMessage
-	AgentCard             *a2apb.AgentCard
-	Credentials           []egress.Credential
-	EgressDestinations    []string
-	ActorTemplateAtespace string
-	ActorTemplateName     string
-	ActorTemplateUID      string
+	Revision                string
+	Namespace               string
+	AgentName               string
+	AgentUID                string
+	SourceSnapshot          json.RawMessage
+	AgentCard               *a2apb.AgentCard
+	Credentials             []egress.Credential
+	EgressDestinations      []string
+	PreparedRuntimeAtespace string
+	PreparedRuntimeName     string
+	PreparedRuntimeUID      string
 }
 
 // SessionQuery narrows a page of sessions to an optional Agent.
@@ -81,22 +81,22 @@ type SessionQuery struct {
 	Limit    int
 }
 
-// SessionTaskSnapshot records the external snapshot at an A2A turn boundary.
-// Only an explicit checkpoint retains a copy after the Actor advances or is deleted.
+// SessionTaskSnapshot records an AX reference at an A2A turn boundary.
+// Only an explicit checkpoint retains a copy after the Task advances or is deleted.
 type SessionTaskSnapshot struct {
 	Atespace     string
-	URI          string
+	Reference    string
 	ContentScope string
 }
 
-// RuntimeArtifact identifies backend resources retained by either runtime kind.
+// RuntimeArtifact identifies AX PreparedRuntimes retained by either runtime kind.
 // Agent configuration and SandboxTemplate provenance stay in their extensions.
 type RuntimeArtifact struct {
-	Revision              string
-	Kind                  string
-	Namespace             string
-	ActorTemplateAtespace string
-	ActorTemplateName     string
-	ActorTemplateUID      string
-	DeletedAt             *time.Time
+	Revision                string
+	Kind                    string
+	Namespace               string
+	PreparedRuntimeAtespace string
+	PreparedRuntimeName     string
+	PreparedRuntimeUID      string
+	DeletedAt               *time.Time
 }

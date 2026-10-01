@@ -19,8 +19,8 @@ func TestCompileOpaqueImage(t *testing.T) {
 		BYO:      &v1alpha3.BYOHarness{},
 		Workload: v1alpha3.HarnessWorkload{Image: "example.com/agent@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Command: []string{"/agent"}, Args: []string{"serve"}},
 		Env:      []v1alpha3.RuntimeEnvVar{{Name: "MODE", Value: new("production")}},
-		Substrate: v1alpha3.RuntimeSubstratePolicy{
-			WorkerPoolRef: corev1.LocalObjectReference{Name: "default"}, SnapshotPolicy: v1alpha3.RuntimeSnapshotPolicy{Location: "snapshots"},
+		AX: v1alpha3.RuntimeAXPolicy{
+			TaskGroupRef: corev1.LocalObjectReference{Name: "default"}, SnapshotLocationOverride: "s3://snapshots",
 		},
 	}}
 	template := &v2translator.TemplateConfiguration{Name: "custom-agent", Namespace: "test", Source: &metav1.ObjectMeta{Name: "custom-agent", Namespace: "test"}, Spec: v1alpha3.AgentTemplateSpec{
@@ -37,7 +37,7 @@ func TestCompileOpaqueImage(t *testing.T) {
 	require.Equal(t, []string{"kagent-controller.kagent"}, revision.EgressDestinations)
 	require.Equal(t, []corev1.EnvVar{
 		{Name: "MODE", Value: "production"},
-		{Name: "KAGENT_API_URL", Value: "http://kagent-controller.kagent:8083"},
+		{Name: "KAGENT_API_URL", Value: "https://kagent-controller.kagent:8083"},
 	}, revision.Environment)
 
 	var config adk.AgentConfig
@@ -58,8 +58,8 @@ func TestCompileOpaqueImageKeepsItsOwnTelemetry(t *testing.T) {
 			{Name: "OTEL_SERVICE_NAME", Value: new("my-langgraph")},
 			{Name: "OTEL_EXPORTER_OTLP_ENDPOINT", Value: new("https://otlp.example.com")},
 		},
-		Substrate: v1alpha3.RuntimeSubstratePolicy{
-			WorkerPoolRef: corev1.LocalObjectReference{Name: "default"}, SnapshotPolicy: v1alpha3.RuntimeSnapshotPolicy{Location: "snapshots"},
+		AX: v1alpha3.RuntimeAXPolicy{
+			TaskGroupRef: corev1.LocalObjectReference{Name: "default"}, SnapshotLocationOverride: "s3://snapshots",
 		},
 	}}
 	template := &v2translator.TemplateConfiguration{Name: "custom-agent", Namespace: "test", Source: &metav1.ObjectMeta{Name: "custom-agent", Namespace: "test"}}

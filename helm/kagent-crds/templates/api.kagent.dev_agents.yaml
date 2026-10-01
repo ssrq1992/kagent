@@ -55,6 +55,36 @@ spec:
                 description: HarnessSpec defines a reusable runtime and its infrastructure
                   policy.
                 properties:
+                  ax:
+                    description: RuntimeAXPolicy selects an AX TaskGroup in the resource's
+                      namespace.
+                    properties:
+                      snapshotLocationOverride:
+                        description: SnapshotLocationOverride optionally replaces
+                          the TaskGroup storage prefix.
+                        pattern: ^(gs|s3)://[^[:space:]]+$
+                        type: string
+                      taskGroupRef:
+                        description: TaskGroupRef references an administrator-managed
+                          AX TaskGroup.
+                        properties:
+                          name:
+                            default: ""
+                            description: |-
+                              Name of the referent.
+                              This field is effectively required, but due to backwards compatibility is
+                              allowed to be empty. Instances of this type with an empty value here are
+                              almost certainly wrong.
+                              More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                            type: string
+                        type: object
+                        x-kubernetes-map-type: atomic
+                        x-kubernetes-validations:
+                        - message: taskGroupRef name must not be empty
+                          rule: self.name.size() > 0
+                    required:
+                    - taskGroupRef
+                    type: object
                   byo:
                     description: BYOHarness selects an image that implements kagent's
                       private A2A contract.
@@ -225,43 +255,6 @@ spec:
                         - message: modelConfigRef name must not be empty
                           rule: self.modelConfigRef.name.size() > 0
                     type: object
-                  substrate:
-                    description: RuntimeSubstratePolicy contains the Substrate policy
-                      shared by all runtime variants.
-                    properties:
-                      snapshotPolicy:
-                        description: SnapshotPolicy configures runtime snapshot storage.
-                        properties:
-                          location:
-                            description: Location is the snapshot storage location
-                              used by Substrate.
-                            pattern: ^[^[:space:]]+$
-                            type: string
-                        required:
-                        - location
-                        type: object
-                      workerPoolRef:
-                        description: WorkerPoolRef references a WorkerPool in the
-                          resource's namespace.
-                        properties:
-                          name:
-                            default: ""
-                            description: |-
-                              Name of the referent.
-                              This field is effectively required, but due to backwards compatibility is
-                              allowed to be empty. Instances of this type with an empty value here are
-                              almost certainly wrong.
-                              More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
-                            type: string
-                        type: object
-                        x-kubernetes-map-type: atomic
-                    required:
-                    - snapshotPolicy
-                    - workerPoolRef
-                    type: object
-                    x-kubernetes-validations:
-                    - message: workerPoolRef name must not be empty
-                      rule: self.workerPoolRef.name.size() > 0
                   workload:
                     description: HarnessWorkload identifies the immutable runtime
                       image used by a Harness.
@@ -288,7 +281,7 @@ spec:
                     - image
                     type: object
                 required:
-                - substrate
+                - ax
                 - workload
                 type: object
                 x-kubernetes-validations:

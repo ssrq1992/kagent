@@ -4,7 +4,6 @@ import (
 	"context"
 	"sync"
 
-	atev1alpha1 "github.com/agent-substrate/substrate/pkg/api/v1alpha1"
 	kagentv1alpha3 "github.com/kagent-dev/kagent/go/api/v1alpha3"
 	"istio.io/istio/pkg/config/schema/kubeclient"
 	"istio.io/istio/pkg/kube/kubetypes"
@@ -100,17 +99,5 @@ func registerTypes() {
 			return c.(Client).Kagent().ApiV1alpha3().RemoteMCPServers(namespace)
 		},
 	)
-	kubeclient.Register(
-		atev1alpha1.GroupVersion.WithResource("workerpools"),
-		atev1alpha1.GroupVersion.WithKind("WorkerPool"),
-		func(c kubeclient.ClientGetter, namespace string, options metav1.ListOptions) (runtime.Object, error) {
-			return c.(Client).Substrate().ApiV1alpha1().WorkerPools(namespace).List(context.Background(), options)
-		},
-		func(c kubeclient.ClientGetter, namespace string, options metav1.ListOptions) (watch.Interface, error) {
-			return c.(Client).Substrate().ApiV1alpha1().WorkerPools(namespace).Watch(context.Background(), options)
-		},
-		func(c kubeclient.ClientGetter, namespace string) kubetypes.WriteAPI[*atev1alpha1.WorkerPool] {
-			return c.(Client).Substrate().ApiV1alpha1().WorkerPools(namespace)
-		},
-	)
+
 }

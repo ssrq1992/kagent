@@ -183,7 +183,7 @@ func scheduledRunTestServer(t *testing.T) (*database.Client, apiv1alpha1.Schedul
 	require.NoError(t, store.RecordRuntimeRevision(t.Context(), database.RuntimeRevision{
 		Revision: pair.DesiredRevision, Namespace: pair.Namespace, AgentName: pair.AgentName, AgentUID: pair.AgentUID,
 		SourceSnapshot: []byte("{}"), AgentCard: &a2apb.AgentCard{}, EgressDestinations: []string{},
-		ActorTemplateAtespace: "team", ActorTemplateName: "runtime", ActorTemplateUID: "runtime-uid",
+		PreparedRuntimeAtespace: "team", PreparedRuntimeName: "runtime", PreparedRuntimeUID: "runtime-uid",
 	}, true))
 	scheme := runtime.NewScheme()
 	require.NoError(t, v1alpha3.AddToScheme(scheme))

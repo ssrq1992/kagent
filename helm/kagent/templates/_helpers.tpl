@@ -298,7 +298,7 @@ Password secret name - returns the chart-managed Secret name for POSTGRES_PASSWO
 {{- if .Values.controller.a2aGatewayUrl -}}
 {{- .Values.controller.a2aGatewayUrl -}}
 {{- else -}}
-{{- printf "http://%s-controller.%s.svc:%d" (include "kagent.fullname" .) (include "kagent.namespace" .) (.Values.controller.service.ports.port | int) -}}
+{{- printf "https://%s-controller.%s.svc:%d" (include "kagent.fullname" .) (include "kagent.namespace" .) (.Values.controller.service.ports.port | int) -}}
 {{- end -}}
 {{- end -}}
 
@@ -343,39 +343,6 @@ imagePullSecrets:
 {{- end -}}
 
 {{/*
-Endpoint the controller dials to reach ateapi.
-
-An explicit controller.substrate.ateApiEndpoint always wins. Otherwise, when
-substrate is installed as a subchart of this release, its own helper is asked
-for the endpoint: the chart prefixes resource names with the release name for
-any release not called "substrate", so the Service is not at the canonical
-api.ate-system.svc and only the subchart knows what it rendered.
-
-Empty when substrate is not a subchart, which leaves the controller on its
-compiled-in default — correct for the topology where substrate is installed as
-its own release and the endpoint is passed explicitly.
-*/}}
-{{- define "kagent.substrate.ateApiEndpoint" -}}
-{{- if .Values.controller.substrate.ateApiEndpoint -}}
-{{- .Values.controller.substrate.ateApiEndpoint -}}
-{{- else if and .Values.substrate .Values.substrate.enabled -}}
-{{- include "substrate.ateApi.endpoint" . -}}
-{{- end -}}
-{{- end -}}
-
-{{/*
-URL the controller uses to reach atenet-router, resolved the same way as
-kagent.substrate.ateApiEndpoint.
-*/}}
-{{- define "kagent.substrate.atenetRouterURL" -}}
-{{- if .Values.controller.substrate.atenetRouterURL -}}
-{{- .Values.controller.substrate.atenetRouterURL -}}
-{{- else if and .Values.substrate .Values.substrate.enabled -}}
-{{- include "substrate.atenetRouter.url" . -}}
-{{- end -}}
-{{- end -}}
-
-{{/*
 Body of oauth2-proxy's custom sign_in.html template (see
 templates/oauth2-proxy-templates.yaml). Kept as its own named template, rather
 than inline in that ConfigMap, so oauth2-proxy.extraEnv in values.yaml can hash
@@ -411,16 +378,6 @@ call. The top-level tag wins over the component tag, as it always has.
 {{- $root := dict "registry" (.Values.controller.image.registry | default .Values.registry) "repository" .Values.controller.image.repository "tag" (coalesce .Values.tag .Values.controller.image.tag .Chart.Version) -}}
 {{- $global := dict "imageRegistry" (include "kagent.globalImageRegistry" .) -}}
 {{- include "kagent.images.image" (dict "imageRoot" $root "global" $global) -}}
-{{- end -}}
-
-{{/* Pass the configured guest digest through to Substrate. */}}
-{{- define "kagent.sandboxGuestImage" -}}
-{{- $image := .Values.controller.sandbox.guestImage -}}
-{{- if $image.digest -}}
-{{- $root := dict "registry" ($image.registry | default .Values.registry) "repository" $image.repository "digest" $image.digest -}}
-{{- $global := dict "imageRegistry" (include "kagent.globalImageRegistry" .) -}}
-{{- include "kagent.images.image" (dict "imageRoot" $root "global" $global) -}}
-{{- end -}}
 {{- end -}}
 
 {{/*

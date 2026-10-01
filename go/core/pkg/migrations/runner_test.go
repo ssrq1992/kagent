@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"github.com/kagent-dev/kagent/go/core/internal/pgtest"
+	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -47,6 +49,14 @@ func startTestDB(t *testing.T) string {
 		t.Skip("skip the PostgreSQL test in short mode")
 	}
 	ctx := context.Background()
+	if dsn := os.Getenv("KAGENT_TEST_POSTGRES_DSN"); dsn != "" {
+		connection, cleanup, err := pgtest.Start(ctx, dsn)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(cleanup)
+		return connection
+	}
 	container, err := tcpostgres.Run(ctx,
 		"pgvector/pgvector:pg18-trixie",
 		tcpostgres.WithDatabase("kagent_test"),
@@ -204,6 +214,9 @@ func TestBuiltinMigrationsRoundTrip(t *testing.T) {
 	}
 	for _, source := range sources {
 		expected := []int64{0, 1}
+		if source.Name == "core" {
+			expected = append(expected, 2, 3, 4)
+		}
 		if versions := testVersions(t, dsn, source.TrackingTable); !slices.Equal(versions, expected) {
 			t.Fatalf("%s versions = %v, want %v", source.Name, versions, expected)
 		}

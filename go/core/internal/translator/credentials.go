@@ -2,6 +2,7 @@ package translator
 
 import (
 	"fmt"
+	ax "github.com/google/ax/pkg/apis/v1alpha1"
 	"net/url"
 	"strings"
 
@@ -33,8 +34,7 @@ func CompileCredentials(input *HarnessInput, extraModels []*ResolvedModelConfig,
 		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || u.User != nil || u.Fragment != "" {
 			return NewValidationError("credential destination must be an absolute HTTP(S) URL without user information or fragment")
 		}
-		uri := "ate-secret://k8s.io/default/" + namespace + "/" + name + "/" + key
-		bindings = append(bindings, egress.Credential{Hostname: u.Hostname(), Header: header, Prefix: prefix, URI: uri})
+		bindings = append(bindings, egress.Credential{Hostname: u.Hostname(), Header: header, Prefix: prefix, SecretKeyRef: &ax.CredentialSecretRef{Namespace: namespace, Name: name, Key: key}})
 		return nil
 	}
 	models := append([]*ResolvedModelConfig(nil), extraModels...)

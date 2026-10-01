@@ -12,16 +12,16 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 )
 
-var _ manager.Runnable = (*ActorWorkflow)(nil)
-var _ manager.LeaderElectionRunnable = (*ActorWorkflow)(nil)
+var _ manager.Runnable = (*TaskWorkflow)(nil)
+var _ manager.LeaderElectionRunnable = (*TaskWorkflow)(nil)
 
 // Every API replica can process idle work; PostgreSQL grants each claim once.
-func (*ActorWorkflow) NeedLeaderElection() bool { return false }
+func (*TaskWorkflow) NeedLeaderElection() bool { return false }
 
 // Start pauses or suspends idle sessions independently of task publication.
 // A periodic scan discovers settled work across API replicas and restarts.
 // Workers are bounded; task reads never wait for them.
-func (w *ActorWorkflow) Start(ctx context.Context) error {
+func (w *TaskWorkflow) Start(ctx context.Context) error {
 	var workers sync.WaitGroup
 	for range 4 {
 		workers.Go(func() {
@@ -48,7 +48,7 @@ func (w *ActorWorkflow) Start(ctx context.Context) error {
 	return nil
 }
 
-func (w *ActorWorkflow) quiesceIdleSession(ctx context.Context, work *database.SessionQuiescence) {
+func (w *TaskWorkflow) quiesceIdleSession(ctx context.Context, work *database.SessionQuiescence) {
 	runtimeCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	var snapshot *database.SessionTaskSnapshot
 	var err error
@@ -59,7 +59,7 @@ func (w *ActorWorkflow) quiesceIdleSession(ctx context.Context, work *database.S
 	}
 	cancel()
 	if err != nil {
-		// No timeout-based takeover: the Substrate request may still complete.
+		// No timeout-based takeover: the AX request may still complete.
 		// Keep admission closed until its outcome can be safely reconciled.
 		logging.FromContext(ctx).ErrorContext(ctx, "runtime boundary outcome unknown", "session_id", work.Session.Id, "version", work.Version, "error", err)
 		return

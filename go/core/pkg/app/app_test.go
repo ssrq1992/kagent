@@ -141,7 +141,7 @@ func TestRegisteredStringDefaults(t *testing.T) {
 	for _, variable := range []kagentenv.StringVar{
 		kagentenv.HTTPBindAddress,
 		kagentenv.PostgresDatabaseURL,
-		kagentenv.SubstrateATEAPIEndpoint,
+		kagentenv.AXEndpoint,
 		kagentenv.KagentNamespace,
 	} {
 		t.Run(variable.Name(), func(t *testing.T) {

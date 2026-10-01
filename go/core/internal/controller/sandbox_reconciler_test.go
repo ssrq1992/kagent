@@ -9,13 +9,13 @@ import (
 	"testing"
 	"time"
 
-	atev1alpha1 "github.com/agent-substrate/substrate/pkg/api/v1alpha1"
-	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
+	ax "github.com/google/ax/pkg/apis/v1alpha1"
 	kagentfake "github.com/kagent-dev/kagent/go/api/clientset/versioned/fake"
 	kagentv1alpha3 "github.com/kagent-dev/kagent/go/api/v1alpha3"
+	"github.com/kagent-dev/kagent/go/core/internal/axruntime"
 	"github.com/kagent-dev/kagent/go/core/internal/database"
-	"github.com/kagent-dev/kagent/go/core/internal/substrate"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
@@ -68,24 +68,31 @@ func (s *sandboxTestStore) RetireSandboxTemplateIdentities(context.Context, stri
 var _ sandboxRevisionStore = (*sandboxTestStore)(nil)
 
 type sandboxTestActors struct {
+	ax.AXClient
+	groups    krt.StaticCollection[sandboxGroupObservation]
 	mu        sync.Mutex
 	store     *sandboxTestStore
-	templates map[string]*ateapipb.ActorTemplate
+	templates map[string]*ax.PreparedRuntime
 	autoReady bool
 }
 
-var _ actorTemplateClient = (*sandboxTestActors)(nil)
-
-func (*sandboxTestActors) EnsureAtespace(context.Context, string) error { return nil }
-func (s *sandboxTestActors) GetActorTemplate(_ context.Context, atespace, name string) (*ateapipb.ActorTemplate, error) {
+func (s *sandboxTestActors) GetTaskGroup(_ context.Context, req *ax.GetTaskGroupRequest, _ ...grpc.CallOption) (*ax.TaskGroup, error) {
+	g := s.groups.GetKey(req.Atespace + "/" + req.Name)
+	if g == nil {
+		return nil, status.Error(codes.NotFound, "missing group")
+	}
+	return &ax.TaskGroup{Metadata: &ax.ObjectMeta{Atespace: g.Ref.Atespace, Name: g.Ref.Name, Uid: g.Ref.Uid}}, nil
+}
+func (s *sandboxTestActors) GetPreparedRuntime(_ context.Context, req *ax.GetPreparedRuntimeRequest, _ ...grpc.CallOption) (*ax.PreparedRuntime, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if template := s.templates[atespace+"/"+name]; template != nil {
+	if template := s.templates[req.Ref.Atespace+"/"+req.Ref.Name]; template != nil {
 		return proto.CloneOf(template), nil
 	}
 	return nil, status.Error(codes.NotFound, "missing")
 }
-func (s *sandboxTestActors) CreateActorTemplate(_ context.Context, template *ateapipb.ActorTemplate) (*ateapipb.ActorTemplate, error) {
+func (s *sandboxTestActors) PrepareRuntime(_ context.Context, req *ax.PrepareRuntimeRequest, _ ...grpc.CallOption) (*ax.PreparedRuntime, error) {
+	template := &ax.PreparedRuntime{Metadata: req.Metadata, Spec: req.Spec, Phase: "Preparing"}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.store.mu.Lock()
@@ -97,36 +104,35 @@ func (s *sandboxTestActors) CreateActorTemplate(_ context.Context, template *ate
 	template = proto.CloneOf(template)
 	template.Metadata.Uid = "backend-uid"
 	if s.autoReady {
-		template.Status = sandboxGoldenStatus()
+		template.Phase = "Ready"
 	}
 	s.templates[template.Metadata.Atespace+"/"+template.Metadata.Name] = template
 	return proto.CloneOf(template), nil
 }
 
-func sandboxGoldenStatus() *ateapipb.ActorTemplateStatus {
-	return &ateapipb.ActorTemplateStatus{GoldenSnapshotStatus: &ateapipb.GoldenSnapshotStatus{GoldenTag: &ateapipb.ObjectRef{Atespace: "ate-golden", Name: "golden"}}}
-}
-
 func sandboxTestTemplate() *kagentv1alpha3.SandboxTemplate {
 	return &kagentv1alpha3.SandboxTemplate{ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "scratch", UID: "template-uid", Generation: 1}, Spec: kagentv1alpha3.SandboxTemplateSpec{
-		Workload:  kagentv1alpha3.SandboxTemplateWorkload{Image: "tools@sha256:" + strings.Repeat("a", 64)},
-		Substrate: kagentv1alpha3.RuntimeSubstratePolicy{WorkerPoolRef: corev1.LocalObjectReference{Name: "default"}, SnapshotPolicy: kagentv1alpha3.RuntimeSnapshotPolicy{Location: "s3://snapshots/"}},
+		Workload: kagentv1alpha3.SandboxTemplateWorkload{Image: "tools@sha256:" + strings.Repeat("a", 64)},
+		AX:       kagentv1alpha3.RuntimeAXPolicy{TaskGroupRef: corev1.LocalObjectReference{Name: "default"}, SnapshotLocationOverride: "s3://snapshots/"},
 	}}
 }
 
-func newSandboxTestReconciler(t *testing.T, guestImage string) (*SandboxReconciler, krt.StaticCollection[*kagentv1alpha3.SandboxTemplate], krt.StaticCollection[*atev1alpha1.WorkerPool]) {
+func newSandboxTestReconciler(t *testing.T, guestImage string) (*SandboxReconciler, krt.StaticCollection[*kagentv1alpha3.SandboxTemplate], krt.StaticCollection[sandboxGroupObservation]) {
 	t.Helper()
 	opts := krt.NewOptionsBuilder(t.Context().Done(), "test-sandbox", nil)
 	template := sandboxTestTemplate()
-	pool := &atev1alpha1.WorkerPool{ObjectMeta: metav1.ObjectMeta{Namespace: template.Namespace, Name: "default"}}
+	pool := sandboxGroupObservation{Ref: &ax.ResourceRef{Atespace: template.Namespace, Name: "default", Uid: "group-uid"}}
 	templates := krt.NewStaticCollection(nil, []*kagentv1alpha3.SandboxTemplate{template}, opts.WithName("SandboxTemplates")...)
-	pools := krt.NewStaticCollection(nil, []*atev1alpha1.WorkerPool{pool}, opts.WithName("WorkerPools")...)
+
 	store := &sandboxTestStore{}
-	actors := &sandboxTestActors{store: store, templates: map[string]*ateapipb.ActorTemplate{}}
+	actors := &sandboxTestActors{store: store, templates: map[string]*ax.PreparedRuntime{}}
 	reconciler := &SandboxReconciler{
-		collections: newSandboxCollections(Collections{SandboxTemplates: templates, WorkerPools: pools}, substrate.SandboxPolicy{GuestImage: guestImage, CPU: "1", Memory: "1Gi"}, opts),
-		store:       store, actors: actors, client: kagentfake.NewSimpleClientset(template.DeepCopy()).ApiV1alpha3(),
+		collections: newSandboxCollections(Collections{SandboxTemplates: templates}, axruntime.SandboxPolicy{CPU: "1", Memory: "1Gi"}, opts),
+		store:       store, ax: actors, client: kagentfake.NewSimpleClientset(template.DeepCopy()).ApiV1alpha3(),
 	}
+	pools := reconciler.collections.groups
+	pools.UpdateObject(pool)
+	actors.groups = pools
 	waitFor(t, func() bool { return reconciler.collections.states.GetKey("team-a/scratch") != nil })
 	return reconciler, templates, pools
 }
@@ -146,7 +152,7 @@ func TestSandboxPreparationPublishesAfterPersistence(t *testing.T) {
 	guestImage := "unreachable.invalid/guest@sha256:" + strings.Repeat("b", 64)
 	s, templates, _ := newSandboxTestReconciler(t, guestImage)
 	store := s.store.(*sandboxTestStore)
-	actors := s.actors.(*sandboxTestActors)
+	actors := s.ax.(*sandboxTestActors)
 	const key = "team-a/scratch"
 	require.NoError(t, s.reconcile(t.Context(), key))
 	require.Empty(t, store.desired.DesiredRevision, "finalizer must persist before preparation")
@@ -155,15 +161,15 @@ func TestSandboxPreparationPublishesAfterPersistence(t *testing.T) {
 	require.Contains(t, template.Finalizers, sandboxPreparationFinalizer)
 	require.NoError(t, s.reconcile(t.Context(), key))
 	state := s.collections.states.GetKey(key)
-	ref := state.DesiredActorTemplate.Metadata
-	observed, err := actors.GetActorTemplate(t.Context(), ref.Atespace, ref.Name)
+	ref := state.DesiredRuntime.Metadata
+	observed, err := actors.GetPreparedRuntime(t.Context(), &ax.GetPreparedRuntimeRequest{Ref: ax.Ref(ref)})
 	require.NoError(t, err)
-	require.Equal(t, guestImage, observed.Volumes[1].Image.Reference)
-	require.Contains(t, string(store.revision.SourceSnapshot), observed.Volumes[1].Image.Reference)
+	require.Equal(t, "Sandbox", observed.Spec.Kind)
+	require.Contains(t, string(store.revision.SourceSnapshot), observed.Spec.Image)
 	require.Equal(t, store.desired.DesiredRevision, store.revision.Revision)
 	require.False(t, store.ready)
 
-	actors.templates[ref.Atespace+"/"+ref.Name].Status = sandboxGoldenStatus()
+	actors.templates[ref.Atespace+"/"+ref.Name].Phase = "Ready"
 	store.recordErr = errors.New("database unavailable with private details")
 	require.ErrorContains(t, s.reconcile(t.Context(), key), "database unavailable")
 	waitFor(t, func() bool { return s.collections.states.GetKey(key).Failure != nil })
@@ -175,7 +181,7 @@ func TestSandboxPreparationPublishesAfterPersistence(t *testing.T) {
 	store.recordErr = nil
 	require.NoError(t, s.reconcile(t.Context(), key))
 	waitFor(t, func() bool {
-		return s.collections.states.GetKey(key).ObservedActorTemplate.GetStatus().GetGoldenSnapshotStatus().GetGoldenTag() != nil
+		return s.collections.states.GetKey(key).ObservedRuntime.GetPhase() == "Ready"
 	})
 	require.True(t, store.ready)
 	require.NoError(t, s.reconcileStatus(t.Context(), key))
@@ -196,27 +202,26 @@ func TestSandboxCollectionsTrackDependenciesAndRejectStaleReadiness(t *testing.T
 	require.NoError(t, s.reconcile(t.Context(), key))
 	waitFor(t, func() bool { return s.collections.states.GetKey(key).RevisionID != "" })
 	original := s.collections.states.GetKey(key)
-	observed := proto.CloneOf(original.DesiredActorTemplate)
-	observed.Status = sandboxGoldenStatus()
+	observed := proto.CloneOf(original.DesiredRuntime)
+	observed.Phase = "Ready"
 	s.collections.observations.UpdateObject(sandboxRuntimeObservation{Key: key, RevisionID: original.RevisionID, Template: observed})
-	waitFor(t, func() bool { return s.collections.states.GetKey(key).ObservedActorTemplate != nil })
+	waitFor(t, func() bool { return s.collections.states.GetKey(key).ObservedRuntime != nil })
 
-	pool := (*pools.GetKey("team-a/default")).DeepCopy()
-	pool.Spec.SandboxClass = atev1alpha1.SandboxClassMicroVM
+	pool := sandboxGroupObservation{Ref: proto.CloneOf(pools.GetKey("team-a/default").Ref)}
+	pool.Ref.Uid = "new-group-uid"
 	pools.UpdateObject(pool)
 	waitFor(t, func() bool { return s.collections.states.GetKey(key).RevisionID != original.RevisionID })
 	changed := s.collections.states.GetKey(key)
 	require.NotEmpty(t, changed.RevisionID)
-	require.Nil(t, changed.ObservedActorTemplate)
-	require.False(t, proto.Equal(original.DesiredActorTemplate.SandboxConfig, changed.DesiredActorTemplate.SandboxConfig))
+	require.Nil(t, changed.ObservedRuntime)
+	require.False(t, proto.Equal(original.DesiredRuntime.Spec.GroupRef, changed.DesiredRuntime.Spec.GroupRef))
 	pools.DeleteObject("team-a/default")
 	waitFor(t, func() bool { return s.collections.states.GetKey(key).Failure != nil })
 	missing := s.collections.states.GetKey(key)
-	require.Equal(t, "WorkerPoolNotFound", missing.Failure.Reason)
+	require.Equal(t, "TaskGroupUnresolved", missing.Failure.Reason)
 	require.Empty(t, missing.RevisionID)
-	require.Nil(t, missing.ObservedActorTemplate)
-	require.NoError(t, s.reconcile(t.Context(), key))
-	require.True(t, strings.HasPrefix(s.store.(*sandboxTestStore).desired.DesiredRevision, "pending:"))
+	require.Nil(t, missing.ObservedRuntime)
+	require.Error(t, s.reconcile(t.Context(), key))
 	pools.UpdateObject(pool)
 	waitFor(t, func() bool { return s.collections.states.GetKey(key).RevisionID == changed.RevisionID })
 	require.Nil(t, s.collections.states.GetKey(key).Failure)
@@ -228,7 +233,7 @@ func TestSandboxCollectionsTrackDependenciesAndRejectStaleReadiness(t *testing.T
 	templates.UpdateObject(edited)
 	waitFor(t, func() bool { return s.collections.states.GetKey(key).Template.Generation == edited.Generation })
 	require.NotEqual(t, changed.RevisionID, s.collections.states.GetKey(key).RevisionID)
-	require.Nil(t, s.collections.states.GetKey(key).ObservedActorTemplate)
+	require.Nil(t, s.collections.states.GetKey(key).ObservedRuntime)
 
 	// A recreated template cannot inherit the previous UID's readiness.
 	template := (*templates.GetKey(key)).DeepCopy()
@@ -236,7 +241,7 @@ func TestSandboxCollectionsTrackDependenciesAndRejectStaleReadiness(t *testing.T
 	templates.UpdateObject(template)
 	waitFor(t, func() bool { return s.collections.states.GetKey(key).Template.UID == template.UID })
 	require.NotEqual(t, changed.RevisionID, s.collections.states.GetKey(key).RevisionID)
-	require.Nil(t, s.collections.states.GetKey(key).ObservedActorTemplate)
+	require.Nil(t, s.collections.states.GetKey(key).ObservedRuntime)
 }
 
 func TestSandboxPreparationRetriesGoldenFailureAndRejectsImmutableConflict(t *testing.T) {
@@ -245,20 +250,23 @@ func TestSandboxPreparationRetriesGoldenFailureAndRejectsImmutableConflict(t *te
 	require.NoError(t, s.reconcile(t.Context(), key))
 	syncSandboxTemplate(t, s, templates)
 	require.NoError(t, s.reconcile(t.Context(), key))
-	ref := s.collections.states.GetKey(key).DesiredActorTemplate.Metadata
-	observed := s.actors.(*sandboxTestActors).templates[ref.Atespace+"/"+ref.Name]
-	observed.Status = &ateapipb.ActorTemplateStatus{GoldenSnapshotStatus: &ateapipb.GoldenSnapshotStatus{ErrorMessage: "snapshot backend unavailable"}}
-	require.ErrorContains(t, s.reconcile(t.Context(), key), "golden snapshot failed")
+	ref := s.collections.states.GetKey(key).DesiredRuntime.Metadata
+	observed := s.ax.(*sandboxTestActors).templates[ref.Atespace+"/"+ref.Name]
+	observed.Phase = "Failed"
+	observed.Message = "snapshot backend unavailable"
+	require.ErrorContains(t, s.reconcile(t.Context(), key), "preparation failed")
 	waitFor(t, func() bool { return s.collections.states.GetKey(key).Failure != nil })
-	require.True(t, s.collections.states.GetKey(key).canPrepare())
-	observed.Status = sandboxGoldenStatus()
+	require.False(t, s.collections.states.GetKey(key).canPrepare())
+	observed.Phase = "Ready"
+	s.collections.observations.DeleteObject(key)
+	waitFor(t, func() bool { return s.collections.states.GetKey(key).canPrepare() })
 	require.NoError(t, s.reconcile(t.Context(), key))
 	waitFor(t, func() bool { return s.collections.states.GetKey(key).Failure == nil })
-	observed.Containers[0].Image = "unexpected"
+	observed.Spec.Image = "unexpected"
 	require.ErrorContains(t, s.reconcile(t.Context(), key), "immutable inputs disagree")
 	waitFor(t, func() bool { return s.collections.states.GetKey(key).Failure != nil })
 	require.False(t, s.collections.states.GetKey(key).canPrepare())
-	require.Nil(t, s.collections.states.GetKey(key).ObservedActorTemplate)
+	require.Nil(t, s.collections.states.GetKey(key).ObservedRuntime)
 }
 
 // A ready runtime may outlive an exhausted status queue. Recovery must not need
@@ -268,9 +276,9 @@ func TestSandboxPendingStatusRecoversWithoutGraphEvent(t *testing.T) {
 	const key = "team-a/scratch"
 	require.NoError(t, s.reconcile(t.Context(), key))
 	syncSandboxTemplate(t, s, templates)
-	s.actors.(*sandboxTestActors).autoReady = true
+	s.ax.(*sandboxTestActors).autoReady = true
 	require.NoError(t, s.reconcile(t.Context(), key))
-	waitFor(t, func() bool { return s.collections.states.GetKey(key).ObservedActorTemplate != nil })
+	waitFor(t, func() bool { return s.collections.states.GetKey(key).ObservedRuntime != nil })
 	client := kagentfake.NewSimpleClientset(s.collections.states.GetKey(key).Template.DeepCopy())
 	failed := false
 	client.PrependReactor("update", "sandboxtemplates", func(action ktesting.Action) (bool, runtime.Object, error) {

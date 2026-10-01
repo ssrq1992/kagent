@@ -10,12 +10,12 @@ export interface HarnessDraft {
   image: string;
   command: string[];
   args: string[];
-  workerPool: string;
+  taskGroup: string;
   snapshotLocation: string;
 }
 
 export function emptyHarnessDraft(): HarnessDraft {
-  return { adapter: "kagent", image: "", command: [], args: [], workerPool: "", snapshotLocation: "" };
+  return { adapter: "kagent", image: "", command: [], args: [], taskGroup: "", snapshotLocation: "" };
 }
 
 export function harnessDraftFromSpec(spec: HarnessSpec): HarnessDraft {
@@ -24,8 +24,8 @@ export function harnessDraftFromSpec(spec: HarnessSpec): HarnessDraft {
     image: spec.workload?.image ?? "",
     command: [...(spec.workload?.command ?? [])],
     args: [...(spec.workload?.args ?? [])],
-    workerPool: spec.substrate?.workerPoolRef?.name ?? "",
-    snapshotLocation: spec.substrate?.snapshotPolicy?.location ?? "",
+    taskGroup: spec.ax?.taskGroupRef?.name ?? "",
+    snapshotLocation: spec.ax?.snapshotLocationOverride ?? "",
   };
 }
 
@@ -44,10 +44,10 @@ export function harnessSpecFromDraft(draft: HarnessDraft, existing?: HarnessSpec
       ...(draft.command.length > 0 ? { command: draft.command } : {}),
       ...(draft.args.length > 0 ? { args: draft.args } : {}),
     },
-    substrate: {
-      ...existing?.substrate,
-      workerPoolRef: { name: draft.workerPool.trim() },
-      snapshotPolicy: { location: draft.snapshotLocation.trim() },
+    ax: {
+      ...existing?.ax,
+      taskGroupRef: { name: draft.taskGroup.trim() },
+      snapshotLocationOverride: draft.snapshotLocation.trim() || undefined,
     },
   };
 }
@@ -57,7 +57,6 @@ export function harnessDraftProblems(draft: HarnessDraft): string[] {
   const problems: string[] = [];
   if (!HARNESS_IMAGE_PATTERN.test(draft.image.trim())) problems.push("A digest-pinned workload image is required.");
   if (draft.adapter === "byo" && draft.command.length === 0) problems.push("A bring-your-own harness needs a command.");
-  if (draft.workerPool.trim() === "") problems.push("A worker pool is required.");
-  if (draft.snapshotLocation.trim() === "") problems.push("A snapshot location is required.");
+  if (draft.taskGroup.trim() === "") problems.push("A TaskGroup is required.");
   return problems;
 }

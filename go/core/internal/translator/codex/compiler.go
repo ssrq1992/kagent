@@ -104,7 +104,7 @@ func (c *Compiler) Compile(ctx context.Context, input *v2translator.HarnessInput
 	environment = append(environment,
 		corev1.EnvVar{Name: env.KagentName.Name(), Value: input.AgentName},
 		corev1.EnvVar{Name: env.KagentNamespace.Name(), Value: template.Namespace},
-		corev1.EnvVar{Name: env.KagentAPIURL.Name(), Value: fmt.Sprintf("http://%s.%s:8083", utils.GetControllerName(), utils.GetResourceNamespace())},
+		corev1.EnvVar{Name: env.KagentAPIURL.Name(), Value: fmt.Sprintf("https://%s.%s:8083", utils.GetControllerName(), utils.GetResourceNamespace())},
 	)
 	environment = append(environment, telemetryConfig.TelemetryEnvironment(runtimeTelemetry, harnessAttributes)...)
 	agents, err := compileAgents(input.Root)
@@ -155,7 +155,7 @@ func (c *Compiler) Compile(ctx context.Context, input *v2translator.HarnessInput
 		Revision: v2translator.Revision{
 			Namespace: template.Namespace,
 			Image:     harness.Spec.Workload.Image, Environment: environment, ConfigJSON: configJSON, AgentCard: card,
-			WorkerPoolName: harness.Spec.Substrate.WorkerPoolRef.Name, SnapshotLocation: harness.Spec.Substrate.SnapshotPolicy.Location,
+			TaskGroupName: harness.Spec.AX.TaskGroupRef.Name, SnapshotLocation: harness.Spec.AX.SnapshotLocationOverride,
 			Credentials: credentials, Provenance: provenance, EgressDestinations: egress,
 		},
 		Warnings: mcp.warnings,

@@ -21,8 +21,8 @@ global:
   # air-gap mirror knob: one value redirects all images. Repository and tag stay
   # per-image. For per-image control, leave this unset and set the per-image
   # registry keys. Covers this chart's own images: controller, sandbox guest, ui, bundled
-  # postgres, grafana-mcp, and substrateWorkerPool.workerImage. The vendored
-  # subcharts (kagent-tools, kmcp, substrate) adopt it when their pinned
+  # postgres and grafana-mcp. The vendored
+  # subcharts (kagent-tools, kmcp) adopt it when their pinned
   # versions bump.
   imageRegistry: ""
   # -- Pull secrets for every pod. The chart merges this list (union) into each
@@ -226,7 +226,7 @@ controller:
     # -- JWT identity claim. Empty uses sub; a missing custom claim falls back to sub.
     userIdClaim: ""
   # -- Public gateway base URL advertised by Session Agent Cards for gRPC and HTTP/JSON-RPC.
-  # @default -- `http://<fullname>-controller.<namespace>.svc:<grpc-port>`
+  # @default -- `https://<fullname>-controller.<namespace>.svc:<grpc-port>`
   a2aGatewayUrl: ""
   # -- The image used for declarative agents.
   agentImage:
@@ -415,26 +415,22 @@ controller:
   # Standalone workspaces, enabled by default.
   # Each SandboxTemplate supplies its own digest-pinned tools image.
   sandbox:
-    # Supply a pinned guest image to prepare sandboxes.
-    guestImage:
-      registry: "" # Defaults to the top-level registry; global.imageRegistry overrides both.
-      repository: kagent-dev/kagent/sandbox-guest
-      digest: "" # Required for sandbox preparation: sha256:<digest>.
     cpu: "1"
     memory: "1Gi"
     defaultTTL: "1h"
     maxTTL: "24h"
 
-  # Agent Substrate. Requires ate-system installed. kagent creates ate-api
-  # ActorTemplates and references an existing Kubernetes WorkerPool.
-  substrate:
-    enabled: false
-    ateApiEndpoint: ""
-    atenetRouterURL: ""
-    # Example when enabled:
-    #   enabled: true
-    #   ateApiEndpoint: "dns:///api.ate-system.svc:443"
-    #   atenetRouterURL: "http://atenet-router.ate-system.svc:80"
+  # AX is an independently installed platform service. These secrets must exist
+  # in the kagent namespace; client URI SAN authorization is configured in AX.
+  ax:
+    endpoint: "dns:///ax-server.ax-system.svc:8443"
+    serverName: "ax-server.ax-system.svc"
+    caSecretName: "ax-server-ca" # ca.crt
+    clientSecretName: "kagent-ax-client" # tls.crt, tls.key
+  # HTTPS is required for AX TaskStore callbacks and browser/API proxy traffic.
+  tls:
+    secretName: "kagent-controller-tls" # tls.crt, tls.key; controller Service DNS SAN
+    caSecretName: "kagent-controller-ca" # ca.crt; public trust bundle mounted in UI
   envFrom: []
 
   # Additional volumes on the output Deployment definition.
@@ -461,26 +457,6 @@ controller:
   # (httpGet / exec / tcpSocket / grpc) when overriding.
   # @default -- httpGet /health on port http, periodSeconds=30
   readinessProbe: {}
-
-# -- Optional Agent Substrate WorkerPool installed by this chart. This is platform
-# capacity and is not owned by individual agents.
-substrateWorkerPool:
-  create: false
-  name: kagent-default
-  replicas: 1
-  workerImage: ""
-  # sandboxClass selects the sandbox runtime family (gvisor|microvm) for workers
-  # and kagent-generated ActorTemplates whose Harness references this pool.
-  # Use a matching workerImage (ateom-gvisor or ateom-microvm). Substrate must have
-  # the corresponding SandboxConfig installed (gvisor-default or microvm);
-  # microvm also requires runtime assets and KVM-capable nodes with atelet's device plugin.
-  sandboxClass: gvisor
-  # Extra labels merged onto the WorkerPool metadata (in addition to the
-  # kagent.dev/worker-pool label used by generated ActorTemplates to select this pool).
-  labels: {}
-  # Optional pod scheduling/resources for worker pods (WorkerPool.spec.template).
-  # nodeSelector / tolerations / priorityClassName / nodeAffinity / resources.
-  template: {}
 
 # ==============================================================================
 # UI CONFIGURATION
@@ -784,23 +760,6 @@ kmcp:
   nameOverride: "kmcp"
   fullnameOverride: "" # Override if desired
   namespaceOverride: "" # Override if desired (in conjunction with fullnameOverride to drop the `kagent-` prefix if you want)
-
-# ==============================================================================
-# SUBSTRATE
-# ==============================================================================
-
-substrate:
-  enabled: false
-  # Grant each agent atespace access to its credential namespace explicitly.
-  # HTTPS also requires the egress-mitm-ca-pool Secret in Substrate's namespace.
-  credentialProvider:
-    namespacePolicies: []
-    # - atespace: kagent
-    #   allowedNamespaces: [kagent]
-  ateApi:
-    extraArgs:
-      # Minimum supported interval for discovering and reconciling actor templates.
-      - --template-resync-interval=250ms
 
 # ==============================================================================
 # BUILT-IN TOOLS

@@ -438,7 +438,7 @@ class AgentConfig(BaseModel):
     network: NetworkConfig | None = None
     context_config: ContextConfig | None = None
     share_tools: bool | None = None  # Enable built-in share link tools
-    # Selects a local (in-actor) session store when set — substrate sandbox agents with
+    # Selects a local session store when set — AX runtime agents with
     # durable-dir session storage. Set by the controller in the rendered config.
     session_db_url: str | None = None
 

@@ -172,7 +172,7 @@ func TestProtobufPersistenceLifecycle(t *testing.T) {
 	})
 	require.NoError(t, err)
 	task.Status.State = a2a.TaskStateCompleted
-	require.NoError(t, saveRuntimeTask(t, client, session.Id, task, &a2a.TaskStatusUpdateEvent{TaskID: task.ID, ContextID: task.ContextID, Status: task.Status}, &SessionTaskSnapshot{Atespace: "team-a", URI: "s3://snapshots/snapshot", ContentScope: "DATA"}))
+	require.NoError(t, saveRuntimeTask(t, client, session.Id, task, &a2a.TaskStatusUpdateEvent{TaskID: task.ID, ContextID: task.ContextID, Status: task.Status}, &SessionTaskSnapshot{Atespace: "team-a", Reference: "s3://snapshots/snapshot", ContentScope: "DATA"}))
 	checkpointRequest := &apiv1alpha1.Checkpoint{Id: uuid.NewString(), SessionId: session.Id, HeadTaskId: string(task.ID)}
 	addUnknown(checkpointRequest)
 	checkpoint, _, err := client.ReserveSessionCheckpoint(ctx, checkpointRequest, "alice", "checkpoint")
@@ -284,16 +284,16 @@ func TestShareAndAgentCardProtobufPersistence(t *testing.T) {
 	card, err := pbconv.ToProtoAgentCard(&a2a.AgentCard{Name: "assistant", Description: "assistant", Version: "v1", SupportedInterfaces: []*a2a.AgentInterface{a2a.NewAgentInterface("http://runtime", a2a.TransportProtocolGRPC)}, DefaultInputModes: []string{"text"}, DefaultOutputModes: []string{"text"}, Skills: []a2a.AgentSkill{{ID: "skill", Name: "skill", Description: "skill", Tags: []string{"tag"}}}, Capabilities: a2a.AgentCapabilities{Streaming: true}})
 	require.NoError(t, err)
 	addUnknown(card)
-	revision := RuntimeRevision{Revision: "revision", Namespace: "team-a", AgentName: "assistant", AgentUID: "template", SourceSnapshot: []byte(`{}`), AgentCard: card, EgressDestinations: []string{}, ActorTemplateAtespace: "team-a", ActorTemplateName: "template"}
+	revision := RuntimeRevision{Revision: "revision", Namespace: "team-a", AgentName: "assistant", AgentUID: "template", SourceSnapshot: []byte(`{}`), AgentCard: card, EgressDestinations: []string{}, PreparedRuntimeAtespace: "team-a", PreparedRuntimeName: "template"}
 	require.NoError(t, client.RecordRuntimeRevision(ctx, revision, false))
 	// Reconciliation can update runtime identity, but the pinned card is immutable.
 	revision.AgentCard = &a2apb.AgentCard{Name: "replacement"}
-	revision.ActorTemplateUID = "new-uid"
+	revision.PreparedRuntimeUID = "new-uid"
 	require.NoError(t, client.RecordRuntimeRevision(ctx, revision, false))
 	stored, err := client.GetRuntimeRevision(ctx, "revision")
 	require.NoError(t, err)
 	require.True(t, proto.Equal(card, stored.AgentCard))
-	require.Equal(t, "new-uid", stored.ActorTemplateUID)
+	require.Equal(t, "new-uid", stored.PreparedRuntimeUID)
 	cards, err := client.ListUnreferencedRuntimeRevisions(ctx)
 	require.NoError(t, err)
 	require.Len(t, cards, 1)

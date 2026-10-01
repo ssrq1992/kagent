@@ -94,9 +94,9 @@ async def measure_persistence(store):
 
 
 async def main():
-    async with grpc.aio.insecure_channel(os.environ["KAGENT_TASKSTORE_TEST_ENDPOINT"]) as channel:
+    async with grpc.aio.secure_channel(os.environ["KAGENT_TASKSTORE_TEST_ENDPOINT"], grpc.ssl_channel_credentials(root_certificates=Path(os.environ["KAGENT_TASKSTORE_TEST_CA"]).read_bytes())) as channel:
         client = AsyncControllerClient(channel=channel)
-        store = KAgentTaskStore(client, Path(os.environ["KAGENT_TASKSTORE_TEST_IDENTITY"]))
+        store = KAgentTaskStore(client)
         runner = Runner()
         runner.rich_history = True
         handler = KAgentRequestHandler(

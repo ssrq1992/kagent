@@ -66,14 +66,6 @@
   - list
   - watch
 - apiGroups:
-  - ate.dev
-  resources:
-  - workerpools
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
   - "apps"
   resources:
   - "*"

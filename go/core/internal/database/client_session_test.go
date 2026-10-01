@@ -131,14 +131,14 @@ func TestSessionTasksAreDurableAndExclusive(t *testing.T) {
 	}
 	first.History = append(first.History, a2a.NewMessageForTask(a2a.MessageRoleAgent, first, a2a.NewTextPart("done")))
 	first.Status.State = a2a.TaskStateCompleted
-	snapshot := &SessionTaskSnapshot{Atespace: "team-a", URI: "s3://snapshots/snapshot-1", ContentScope: "DATA"}
+	snapshot := &SessionTaskSnapshot{Atespace: "team-a", Reference: "s3://snapshots/snapshot-1", ContentScope: "DATA"}
 	if err := saveRuntimeTask(t, client, "11111111-1111-4111-8111-111111111111", first, first, snapshot); err != nil {
 		t.Fatal(err)
 	}
 	var snapshotAtespace, snapshotURI string
 	var historySequence, latestSequence int64
 	if err := db.QueryRow(ctx, `
-		SELECT snapshot_atespace, snapshot_uri, history_sequence
+		SELECT runtime_atespace, runtime_reference, history_sequence
 		FROM session_task WHERE history_id = '11111111-1111-4111-8111-111111111111' AND id = 'task-1'
 	`).Scan(&snapshotAtespace, &snapshotURI, &historySequence); err != nil {
 		t.Fatal(err)
@@ -146,7 +146,7 @@ func TestSessionTasksAreDurableAndExclusive(t *testing.T) {
 	if err := db.QueryRow(ctx, `SELECT MAX(sequence) FROM session_task_event`).Scan(&latestSequence); err != nil {
 		t.Fatal(err)
 	}
-	if snapshotAtespace != snapshot.Atespace || snapshotURI != snapshot.URI || historySequence != latestSequence {
+	if snapshotAtespace != snapshot.Atespace || snapshotURI != snapshot.Reference || historySequence != latestSequence {
 		t.Fatalf("stored boundary = %s/%s sequence %d", snapshotAtespace, snapshotURI, historySequence)
 	}
 	got, err = client.GetSessionTask(ctx, "11111111-1111-4111-8111-111111111111", "task-1", nil)
@@ -233,7 +233,7 @@ func TestSessionCheckpointRetainsRecordedBoundary(t *testing.T) {
 	}
 	task.Status.State = a2a.TaskStateCompleted
 	if err := saveRuntimeTask(t, client, sessionID, task, task,
-		&SessionTaskSnapshot{Atespace: "team-a", URI: "s3://snapshots/snapshot-1", ContentScope: "DATA"}); err != nil {
+		&SessionTaskSnapshot{Atespace: "team-a", Reference: "s3://snapshots/snapshot-1", ContentScope: "DATA"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -258,7 +258,7 @@ func TestSessionCheckpointRetainsRecordedBoundary(t *testing.T) {
 		t.Fatalf("rename of a creating checkpoint = %v, want not found", err)
 	}
 	if checkpoint.HeadTaskId != "task-1" || snapshot == nil ||
-		*snapshot != (SessionTaskSnapshot{Atespace: "team-a", URI: "s3://snapshots/snapshot-1", ContentScope: "DATA"}) || checkpoint.HistorySequence == 0 {
+		*snapshot != (SessionTaskSnapshot{Atespace: "team-a", Reference: "s3://snapshots/snapshot-1", ContentScope: "DATA"}) || checkpoint.HistorySequence == 0 {
 		t.Fatalf("checkpoint boundary = %+v", checkpoint)
 	}
 	if _, err := client.CreateRuntimeTask(ctx, sessionID, taskMutationHash("blocked-request"), newSessionTask("task-2", "message-2"), ""); !errors.Is(err, ErrConflict) {
@@ -292,7 +292,7 @@ func TestSessionCheckpointRetainsRecordedBoundary(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "11111111-1111-4111-8111-111111111111-task-1", restored.GetName())
 	retained, tagUID, err := client.GetSessionCheckpointSnapshot(ctx, checkpoint.GetId(), "alice")
-	if err != nil || tagUID != "tag-uid" || retained.URI != "s3://tags/checkpoint" || retained.ContentScope != snapshot.ContentScope {
+	if err != nil || tagUID != "tag-uid" || retained.Reference != "s3://tags/checkpoint" || retained.ContentScope != snapshot.ContentScope {
 		t.Fatalf("checkpoint tag = %q, error %v", tagUID, err)
 	}
 	if replayed, err := client.FinalizeSessionCheckpoint(ctx, checkpoint.GetId(), "tag-uid", "s3://tags/checkpoint", ""); err != nil || replayed.State != apiv1alpha1.CheckpointState_CHECKPOINT_STATE_READY {
@@ -323,9 +323,9 @@ func TestSessionCheckpointRetainsRecordedBoundary(t *testing.T) {
 	if ref, tag, err := client.BeginDeleteSessionCheckpoint(ctx, checkpoint.GetId(), "mallory"); !errors.Is(err, ErrNotFound) || ref != nil || tag != "" {
 		t.Fatalf("unauthorized deletion = %+v, %q, %v", ref, tag, err)
 	}
-	deletingSnapshot, deletingTagUID, err := client.BeginDeleteSessionCheckpoint(ctx, checkpoint.GetId(), "alice")
-	if err != nil || deletingSnapshot == nil || *deletingSnapshot != *retained || deletingTagUID != "tag-uid" {
-		t.Fatalf("deleting snapshot = %+v, tag = %q, error %v", deletingSnapshot, deletingTagUID, err)
+	deletingSnapshot, deletingCheckpointUID, err := client.BeginDeleteSessionCheckpoint(ctx, checkpoint.GetId(), "alice")
+	if err != nil || deletingSnapshot == nil || *deletingSnapshot != *retained || deletingCheckpointUID != "tag-uid" {
+		t.Fatalf("deleting snapshot = %+v, tag = %q, error %v", deletingSnapshot, deletingCheckpointUID, err)
 	}
 	if _, err := client.GetSessionCheckpoint(ctx, checkpoint.GetId(), "alice"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("deleting checkpoint is publicly visible: %v", err)
@@ -333,9 +333,9 @@ func TestSessionCheckpointRetainsRecordedBoundary(t *testing.T) {
 	if _, err := client.UpdateCheckpointName(ctx, checkpoint.GetId(), "alice", "too late"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("rename of a deleting checkpoint = %v, want not found", err)
 	}
-	deletingSnapshot, deletingTagUID, err = client.BeginDeleteSessionCheckpoint(ctx, checkpoint.GetId(), "alice")
-	if err != nil || deletingSnapshot == nil || *deletingSnapshot != *retained || deletingTagUID != "tag-uid" {
-		t.Fatalf("deleting snapshot = %+v, tag = %q, error %v", deletingSnapshot, deletingTagUID, err)
+	deletingSnapshot, deletingCheckpointUID, err = client.BeginDeleteSessionCheckpoint(ctx, checkpoint.GetId(), "alice")
+	if err != nil || deletingSnapshot == nil || *deletingSnapshot != *retained || deletingCheckpointUID != "tag-uid" {
+		t.Fatalf("deleting snapshot = %+v, tag = %q, error %v", deletingSnapshot, deletingCheckpointUID, err)
 	}
 	if err := client.DeleteSessionCheckpoint(ctx, checkpoint.GetId(), "alice"); err != nil {
 		t.Fatal(err)
@@ -364,8 +364,8 @@ func TestForkSessionCopiesBoundedHistory(t *testing.T) {
 		AgentName: "assistant", AgentUID: "template-uid",
 
 		SourceSnapshot: []byte("{}"), AgentCard: &a2apb.AgentCard{Name: "assistant"}, EgressDestinations: []string{},
-		ActorTemplateAtespace: "team-a", ActorTemplateName: "assistant-kagent-revision",
-		ActorTemplateUID: "actor-template-uid",
+		PreparedRuntimeAtespace: "team-a", PreparedRuntimeName: "assistant-kagent-revision",
+		PreparedRuntimeUID: "actor-template-uid",
 	}
 	pair := AgentDefinition{
 		Namespace: "team-a", AgentName: "assistant", AgentUID: "template-uid",
@@ -400,7 +400,7 @@ func TestForkSessionCopiesBoundedHistory(t *testing.T) {
 	}
 	first.Status.State = a2a.TaskStateInputRequired
 	if err := saveRuntimeTask(t, client, source.GetId(), first, first,
-		&SessionTaskSnapshot{Atespace: "team-a", URI: "s3://snapshots/snapshot-1", ContentScope: "DATA"}); err != nil {
+		&SessionTaskSnapshot{Atespace: "team-a", Reference: "s3://snapshots/snapshot-1", ContentScope: "DATA"}); err != nil {
 		t.Fatal(err)
 	}
 	_, _, err = client.ReserveSessionCheckpoint(ctx, &apiv1alpha1.Checkpoint{Id: uuid.NewString(), SessionId: source.GetId(), HeadTaskId: "task-1"}, "alice", "hitl-checkpoint-request")
@@ -408,7 +408,7 @@ func TestForkSessionCopiesBoundedHistory(t *testing.T) {
 
 	first.Status.State = a2a.TaskStateCompleted
 	if err := saveRuntimeTask(t, client, source.GetId(), first, first,
-		&SessionTaskSnapshot{Atespace: "team-a", URI: "s3://snapshots/snapshot-1", ContentScope: "DATA"}); err != nil {
+		&SessionTaskSnapshot{Atespace: "team-a", Reference: "s3://snapshots/snapshot-1", ContentScope: "DATA"}); err != nil {
 		t.Fatal(err)
 	}
 	checkpoint, _, err := client.ReserveSessionCheckpoint(ctx, &apiv1alpha1.Checkpoint{Id: "99999999-9999-4999-8999-999999999999", SessionId: source.GetId(), HeadTaskId: "task-1"}, "alice", "checkpoint-request-1")
@@ -434,7 +434,7 @@ func TestForkSessionCopiesBoundedHistory(t *testing.T) {
 	}
 	second.Status.State = a2a.TaskStateCompleted
 	if err := saveRuntimeTask(t, client, source.GetId(), second, second,
-		&SessionTaskSnapshot{Atespace: "team-a", URI: "s3://snapshots/snapshot-2", ContentScope: "DATA"}); err != nil {
+		&SessionTaskSnapshot{Atespace: "team-a", Reference: "s3://snapshots/snapshot-2", ContentScope: "DATA"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := deleteSession(ctx, client, source.GetId()); err != nil {
@@ -471,7 +471,7 @@ func TestForkSessionCopiesBoundedHistory(t *testing.T) {
 	}
 	var snapshotUID string
 	require.NoError(t, db.QueryRow(ctx, `
-  SELECT snapshot_uri FROM session_task
+  SELECT runtime_reference FROM session_task
   WHERE history_id = (SELECT history_id FROM session WHERE id = $1) AND id = $2
  `, fork.GetId(), copied.ID).Scan(&snapshotUID))
 	require.Equal(t, "s3://tags/checkpoint", snapshotUID)
@@ -523,8 +523,8 @@ func TestSessionCreateAndTransitions(t *testing.T) {
 		AgentName: "assistant", AgentUID: "template-uid",
 
 		SourceSnapshot: []byte("{}"), AgentCard: &a2apb.AgentCard{Name: "assistant"}, EgressDestinations: []string{},
-		ActorTemplateAtespace: "team-a", ActorTemplateName: "assistant-kagent-revision",
-		ActorTemplateUID: "actor-template-uid",
+		PreparedRuntimeAtespace: "team-a", PreparedRuntimeName: "assistant-kagent-revision",
+		PreparedRuntimeUID: "actor-template-uid",
 	}
 	pair := AgentDefinition{
 		Namespace: "team-a", AgentName: "assistant", AgentUID: "template-uid",
@@ -625,8 +625,8 @@ func sessionFixture(t *testing.T, client *Client, ctx context.Context, namespace
 		AgentName: template, AgentUID: template + "-uid",
 
 		SourceSnapshot: []byte("{}"), AgentCard: &a2apb.AgentCard{}, EgressDestinations: []string{},
-		ActorTemplateAtespace: namespace, ActorTemplateName: revisionID + "-actor-template",
-		ActorTemplateUID: revisionID + "-actor-uid",
+		PreparedRuntimeAtespace: namespace, PreparedRuntimeName: revisionID + "-actor-template",
+		PreparedRuntimeUID: revisionID + "-actor-uid",
 	}
 	pair := AgentDefinition{
 		Namespace: namespace, AgentName: template, AgentUID: template + "-uid",
@@ -778,7 +778,7 @@ func TestForkTaskOrderAndAuthorityIsolation(t *testing.T) {
 		require.NoError(t, err)
 		task.Status.State = a2a.TaskStateCompleted
 		require.NoError(t, saveRuntimeTask(t, client, source.GetId(), task, task,
-			&SessionTaskSnapshot{Atespace: "team-a", URI: "snapshot-" + id, ContentScope: "DATA"}))
+			&SessionTaskSnapshot{Atespace: "team-a", Reference: "snapshot-" + id, ContentScope: "DATA"}))
 	}
 	checkpoint, _, err := client.ReserveSessionCheckpoint(ctx, &apiv1alpha1.Checkpoint{
 		Id: uuid.NewString(), SessionId: source.GetId(), HeadTaskId: "a-second",
@@ -821,7 +821,7 @@ func TestForkTaskOrderAndAuthorityIsolation(t *testing.T) {
 		Id: uuid.NewString(), SessionId: fork.GetId(), HeadTaskId: forkHead,
 	}, "alice", uuid.NewString())
 	require.NoError(t, err)
-	require.Equal(t, "tag-snapshot", snapshot.URI)
+	require.Equal(t, "tag-snapshot", snapshot.Reference)
 	_, err = client.FinalizeSessionCheckpoint(ctx, nested.GetId(), "nested-tag", "nested-snapshot", "")
 	require.NoError(t, err)
 	fork2, _, err := client.ForkSession(ctx, nested.GetId(), "alice", uuid.NewString(), uuid.NewString())
@@ -924,7 +924,7 @@ func TestDeletedSessionPreservesRequestIdentityAndHidesAccess(t *testing.T) {
 	require.Len(t, revisions, 1)
 	_, err = client.BeginRuntimeRevisionDeletion(ctx, "revision")
 	require.NoError(t, err)
-	require.NoError(t, client.DeleteRuntimeRevision(ctx, "revision", revisions[0].ActorTemplateUID))
+	require.NoError(t, client.DeleteRuntimeRevision(ctx, "revision", revisions[0].PreparedRuntimeUID))
 }
 
 func TestShareCreationRacesSessionDeletion(t *testing.T) {

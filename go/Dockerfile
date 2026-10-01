@@ -9,20 +9,22 @@ ARG BUILDPLATFORM
 # Which package to build (e.g. core/cmd/controller/main.go, adk/cmd/main.go)
 ARG BUILD_PACKAGE=core/cmd/controller/main.go
 
-WORKDIR /workspace
+WORKDIR /workspace/kagent/go
 # Copy the Go module manifests
-COPY go.mod go.sum .
+# Build context is kagentOnAx: the local AX replacement must exist in images.
+COPY ax/ /workspace/ax/
+COPY kagent/go/go.mod kagent/go/go.sum .
 # cache deps before building and copying source so that we don't need to re-download as much
 # and so that source changes don't invalidate our downloaded layer
 RUN --mount=type=cache,target=/root/go/pkg/mod,rw      \
     --mount=type=cache,target=/root/.cache/go-build,rw \
      go mod download
 # Copy all source
-COPY api/ api/
-COPY core/ core/
-COPY adk/ adk/
-COPY harness/ harness/
-COPY pkg/ pkg/
+COPY kagent/go/api/ api/
+COPY kagent/go/core/ core/
+COPY kagent/go/adk/ adk/
+COPY kagent/go/harness/ harness/
+COPY kagent/go/pkg/ pkg/
 
 # Build
 ARG LDFLAGS

@@ -7,17 +7,18 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
+	ax "github.com/google/ax/pkg/apis/v1alpha1"
 	"github.com/google/uuid"
 	apiv1alpha1 "github.com/kagent-dev/kagent/go/api/gen/kagent/api/v1alpha1"
+	"github.com/kagent-dev/kagent/go/core/internal/axruntime"
 	"github.com/kagent-dev/kagent/go/core/internal/database"
 	"github.com/kagent-dev/kagent/go/core/internal/service/serviceerrors"
-	"github.com/kagent-dev/kagent/go/core/internal/substrate"
 	"github.com/kagent-dev/kagent/go/core/pkg/auth"
 	"golang.org/x/sync/singleflight"
 	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 )
 
 const (
@@ -41,21 +42,13 @@ type workflow interface {
 	Create(context.Context, *apiv1alpha1.Session) (*apiv1alpha1.Session, error)
 }
 
-type tagClient interface {
-	GetActor(context.Context, string, string) (*ateapipb.Actor, error)
-	GetTag(context.Context, string, string) (*ateapipb.Tag, error)
-	CreateTag(context.Context, string, string, string) (*ateapipb.Tag, error)
-	DeleteTag(context.Context, string, string) error
-}
-
 type Service struct {
 	// creates coalesces identical requests within this service session.
-	// TODO: route tag creation and cleanup through durable session ownership
-	// so retries on different replicas cannot race.
+	// AX owns durable checkpoint idempotency across replicas.
 	creates    singleflight.Group
 	store      store
 	authorizer auth.Authorizer
-	tags       tagClient
+	runtime    ax.AXClient
 	workflow   workflow
 }
 
@@ -70,8 +63,8 @@ type ListResult struct {
 	NextPageToken string
 }
 
-func NewService(store store, authorizer auth.Authorizer, tags tagClient, workflow workflow) *Service {
-	return &Service{store: store, authorizer: authorizer, tags: tags, workflow: workflow}
+func NewService(store store, authorizer auth.Authorizer, runtime ax.AXClient, workflow workflow) *Service {
+	return &Service{store: store, authorizer: authorizer, runtime: runtime, workflow: workflow}
 }
 
 func (s *Service) Create(ctx context.Context, sessionID, requestID, expectedHeadTaskID string) (*apiv1alpha1.Checkpoint, error) {
@@ -128,75 +121,39 @@ func (s *Service) create(ctx context.Context, userID, sessionID, requestID, expe
 		return checkpoint, nil
 	}
 
-	tag, err := s.ensureTag(ctx, checkpoint, snapshot)
-	if err != nil {
-		cleanupErr := s.tags.DeleteTag(ctx, snapshot.Atespace, tagName(checkpoint.GetId()))
-		if cleanupErr == nil || status.Code(cleanupErr) == codes.NotFound {
-			_, finalizeErr := s.store.FinalizeSessionCheckpoint(ctx, checkpoint.GetId(), "", "", err.Error())
-			err = errors.Join(err, finalizeErr)
-		} else {
-			err = errors.Join(err, fmt.Errorf("cleanup checkpoint tag: %w", cleanupErr))
-		}
-		return nil, serviceerrors.NewUnavailable("Failed to retain checkpoint snapshot", err)
+	reference, err := axruntime.DecodeReference(snapshot.Reference)
+	if err != nil || reference.BoundaryRef == "" || snapshot.ContentScope != "DATA" {
+		return nil, serviceerrors.NewFailedPrecondition("Checkpoint requires an AX runtime boundary", err)
 	}
-	checkpoint, err = s.store.FinalizeSessionCheckpoint(ctx, checkpoint.GetId(), tag.GetMetadata().GetUid(), tag.GetStatus().GetSnapshot().GetSnapshotUri(), "")
+	retained, err := s.runtime.CreateTaskCheckpoint(ctx, &ax.CreateTaskCheckpointRequest{Name: checkpointName(checkpoint.Id), TaskRef: reference.Task, ExpectedBoundaryRef: reference.BoundaryRef, RequestId: checkpoint.Id})
+	if err != nil {
+		// An ambiguous response retains CREATING and its business admission barrier.
+		// Retrying the same AX receipt is safe; speculative cleanup is not.
+		return nil, serviceerrors.NewUnavailable("Failed to retain AX checkpoint", err)
+	}
+	if err = verifyCheckpoint(retained, reference, checkpointName(checkpoint.Id)); err != nil {
+		return nil, serviceerrors.NewFailedPrecondition("AX checkpoint identity changed", err)
+	}
+	reference.Checkpoint = ax.Ref(retained.Metadata)
+	encoded, err := reference.Encode()
+	if err != nil {
+		return nil, err
+	}
+	checkpoint, err = s.store.FinalizeSessionCheckpoint(ctx, checkpoint.Id, reference.Checkpoint.Uid, encoded, "")
 	if err != nil {
 		return nil, serviceerrors.NewInternal("Failed to publish checkpoint", err)
 	}
 	return checkpoint, nil
 }
 
-// The CREATING reservation blocks task admission and lifecycle changes while
-// CreateTag copies the Actor's current snapshot. Verify both sides of the copy
-// because ate-api also permits Actors to be changed outside kagent.
-func (s *Service) ensureTag(ctx context.Context, checkpoint *apiv1alpha1.Checkpoint, reference *database.SessionTaskSnapshot) (*ateapipb.Tag, error) {
-	actorName := substrate.ActorName(checkpoint.GetSessionId())
-	actor, err := s.verifySnapshot(ctx, actorName, reference)
-	if err != nil {
-		return nil, err
+func verifyCheckpoint(checkpoint *ax.TaskCheckpoint, ref axruntime.Reference, name string) error {
+	metadata := checkpoint.GetMetadata()
+	if ax.ValidateRef(ax.Ref(metadata), true) != nil || metadata.Atespace != ref.Task.Atespace || metadata.Name != name ||
+		!proto.Equal(checkpoint.SourceTask, ref.Task) || !proto.Equal(checkpoint.RuntimeRef, ref.Runtime) || !proto.Equal(checkpoint.GroupRef, ref.Group) ||
+		checkpoint.BoundaryRef != ref.BoundaryRef || checkpoint.Phase != "Ready" || ref.Checkpoint != nil && !proto.Equal(ax.Ref(metadata), ref.Checkpoint) {
+		return fmt.Errorf("invalid AX checkpoint identity or boundary")
 	}
-	name := tagName(checkpoint.GetId())
-	tag, err := s.tags.CreateTag(ctx, reference.Atespace, name, actorName)
-	if err != nil {
-		tag, err = s.tags.GetTag(ctx, reference.Atespace, name)
-		if err != nil {
-			return nil, fmt.Errorf("create snapshot tag: %w", err)
-		}
-	}
-	metadata, source, snapshot := tag.GetMetadata(), tag.GetSourceActor(), tag.GetStatus().GetSnapshot()
-	if metadata.GetAtespace() != reference.Atespace || metadata.GetName() != name || metadata.GetUid() == "" ||
-		source.GetAtespace() != reference.Atespace || source.GetName() != actorName ||
-		tag.GetStatus().GetActorTemplateUid() != actor.GetStatus().GetExternalSnapshot().GetActorTemplateUid() ||
-		snapshot.GetSnapshotUri() == "" ||
-		strings.TrimPrefix(snapshot.GetContentScope().String(), "SNAPSHOT_CONTENT_SCOPE_") != reference.ContentScope ||
-		tag.GetScope() != ateapipb.TagScope_TAG_SCOPE_ATESPACE {
-		return nil, fmt.Errorf("snapshot tag %s/%s returned invalid identity", reference.Atespace, name)
-	}
-	verified, err := s.verifySnapshot(ctx, actorName, reference)
-	if err != nil {
-		return nil, err
-	}
-	if verified.GetMetadata().GetUid() != actor.GetMetadata().GetUid() {
-		return nil, fmt.Errorf("checkpoint Actor identity changed while copying snapshot")
-	}
-	return tag, nil
-}
-
-func (s *Service) verifySnapshot(ctx context.Context, actorName string, reference *database.SessionTaskSnapshot) (*ateapipb.Actor, error) {
-	actor, err := s.tags.GetActor(ctx, reference.Atespace, actorName)
-	if err != nil {
-		return nil, fmt.Errorf("get checkpoint Actor: %w", err)
-	}
-	metadata, snapshot := actor.GetMetadata(), actor.GetStatus().GetExternalSnapshot()
-	if metadata.GetAtespace() != reference.Atespace || metadata.GetName() != actorName || metadata.GetUid() == "" ||
-		actor.GetStatus().GetState() != ateapipb.ActorState_ACTOR_STATE_SUSPENDED ||
-		reference.URI == "" || snapshot.GetSnapshotUri() != reference.URI || snapshot.GetActorTemplateUid() == "" {
-		return nil, fmt.Errorf("checkpoint Actor %s/%s snapshot changed", reference.Atespace, actorName)
-	}
-	if scope := strings.TrimPrefix(snapshot.GetContentScope().String(), "SNAPSHOT_CONTENT_SCOPE_"); scope != reference.ContentScope {
-		return nil, fmt.Errorf("checkpoint Actor %s/%s snapshot content scope changed", reference.Atespace, actorName)
-	}
-	return actor, nil
+	return nil
 }
 
 func (s *Service) Get(ctx context.Context, checkpointID string) (*apiv1alpha1.Checkpoint, error) {
@@ -262,17 +219,13 @@ func (s *Service) Delete(ctx context.Context, checkpointID string) error {
 	if err != nil {
 		return serviceerrors.NewInternal("Failed to begin checkpoint deletion", err)
 	}
-	tag, err := s.tags.GetTag(ctx, snapshot.Atespace, tagName(checkpointID))
+	reference, err := axruntime.DecodeReference(snapshot.Reference)
+	if err != nil || reference.Checkpoint == nil || reference.Checkpoint.Uid != tagUID {
+		return serviceerrors.NewFailedPrecondition("Invalid AX checkpoint reference", err)
+	}
+	_, err = s.runtime.DeleteTaskCheckpoint(ctx, &ax.DeleteTaskCheckpointRequest{Ref: reference.Checkpoint, OperationId: "delete-" + checkpointID})
 	if err != nil && status.Code(err) != codes.NotFound {
-		return serviceerrors.NewUnavailable("Failed to get checkpoint snapshot tag", err)
-	}
-	if err == nil && (tag.GetMetadata().GetUid() != tagUID ||
-		tag.GetMetadata().GetAtespace() != snapshot.Atespace || tag.GetMetadata().GetName() != tagName(checkpointID) ||
-		tag.GetStatus().GetSnapshot().GetSnapshotUri() != snapshot.URI) {
-		return serviceerrors.NewFailedPrecondition("Checkpoint snapshot tag identity changed", nil)
-	}
-	if err := s.tags.DeleteTag(ctx, snapshot.Atespace, tagName(checkpointID)); err != nil && status.Code(err) != codes.NotFound {
-		return serviceerrors.NewUnavailable("Failed to delete checkpoint snapshot tag", err)
+		return serviceerrors.NewUnavailable("Failed to delete AX checkpoint", err)
 	}
 	if err := s.store.DeleteSessionCheckpoint(ctx, checkpointID, userID); err != nil {
 		return serviceerrors.NewInternal("Failed to delete checkpoint", err)
@@ -318,15 +271,16 @@ func (s *Service) Fork(ctx context.Context, checkpointID, requestID string) (*ap
 	if snapshot.ContentScope != "DATA" {
 		return nil, serviceerrors.NewFailedPrecondition("Checkpoint includes process state and cannot be forked", nil)
 	}
-	tag, err := s.tags.GetTag(ctx, snapshot.Atespace, tagName(checkpointID))
-	if err != nil {
-		return nil, serviceerrors.NewUnavailable("Failed to get checkpoint tag", err)
+	reference, err := axruntime.DecodeReference(snapshot.Reference)
+	if err != nil || reference.Checkpoint == nil || reference.Checkpoint.Uid != tagUID {
+		return nil, serviceerrors.NewFailedPrecondition("Invalid AX checkpoint reference", err)
 	}
-	if tagUID == "" || tag.GetMetadata().GetUid() != tagUID ||
-		tag.GetMetadata().GetAtespace() != snapshot.Atespace || tag.GetMetadata().GetName() != tagName(checkpointID) ||
-		snapshot.URI == "" || tag.GetStatus().GetSnapshot().GetSnapshotUri() != snapshot.URI ||
-		tag.GetStatus().GetSnapshot().GetContentScope() != ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA {
-		return nil, serviceerrors.NewFailedPrecondition("Checkpoint tag identity changed", nil)
+	retained, err := s.runtime.GetTaskCheckpoint(ctx, &ax.GetTaskCheckpointRequest{Ref: reference.Checkpoint})
+	if err != nil {
+		return nil, serviceerrors.NewUnavailable("Failed to get AX checkpoint", err)
+	}
+	if err = verifyCheckpoint(retained, reference, checkpointName(checkpointID)); err != nil {
+		return nil, serviceerrors.NewFailedPrecondition("AX checkpoint identity changed", err)
 	}
 	id, err := uuid.NewV7()
 	if err != nil {
@@ -391,7 +345,7 @@ func encodePageToken(id string) string {
 	return base64.RawURLEncoding.EncodeToString([]byte(id))
 }
 
-func tagName(checkpointID string) string { return "checkpoint-" + checkpointID }
+func checkpointName(checkpointID string) string { return "checkpoint-" + checkpointID }
 
 func decodePageToken(token string) (string, error) {
 	if token == "" {

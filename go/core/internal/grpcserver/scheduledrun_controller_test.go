@@ -15,6 +15,7 @@ import (
 	a2atype "github.com/a2aproject/a2a-go/v2/a2a"
 	a2apb "github.com/a2aproject/a2a-go/v2/a2apb/v1"
 	"github.com/a2aproject/a2a-go/v2/a2apb/v1/pbconv"
+	ax "github.com/google/ax/pkg/apis/v1alpha1"
 	"github.com/google/uuid"
 	apia2a "github.com/kagent-dev/kagent/go/api/a2a"
 	apiv1alpha1 "github.com/kagent-dev/kagent/go/api/gen/kagent/api/v1alpha1"
@@ -23,11 +24,11 @@ import (
 	"github.com/kagent-dev/kagent/go/core/internal/database"
 	authimpl "github.com/kagent-dev/kagent/go/core/internal/httpserver/auth"
 	sessionsvc "github.com/kagent-dev/kagent/go/core/internal/service/session"
-	"github.com/kagent-dev/kagent/go/core/internal/substrate"
 	"github.com/kagent-dev/kagent/go/core/pkg/auth"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
@@ -67,7 +68,7 @@ func (s lostTaskLinkStore) UpdateScheduledRunExecution(ctx context.Context, leas
 }
 
 func (w *scheduledControllerWorkflow) Create(ctx context.Context, session *apiv1alpha1.Session) (*apiv1alpha1.Session, error) {
-	authority := substrate.ActorHost("team", substrate.ActorName(session.GetId()), "")
+	authority := "task-" + session.GetId()
 	return w.finish(ctx, session.Id, apiv1alpha1.RuntimeOperation_RUNTIME_OPERATION_CREATE, authority)
 }
 
@@ -85,7 +86,7 @@ func (w *scheduledControllerWorkflow) Delete(ctx context.Context, session *apiv1
 
 func (w *scheduledControllerWorkflow) Quiesce(context.Context, *apiv1alpha1.Session) (*database.SessionTaskSnapshot, error) {
 	w.quiesces.Add(1)
-	return &database.SessionTaskSnapshot{Atespace: "team", URI: "s3://snapshots/snapshot", ContentScope: "FULL"}, nil
+	return &database.SessionTaskSnapshot{Atespace: "team", Reference: "s3://snapshots/snapshot", ContentScope: "FULL"}, nil
 }
 
 func (w *scheduledControllerWorkflow) Pause(context.Context, *apiv1alpha1.Session) error {
@@ -134,7 +135,7 @@ type scheduledControllerRuntime struct {
 
 func (r *scheduledControllerRuntime) SendStreamingMessage(req *a2apb.SendMessageRequest, stream grpc.ServerStreamingServer[a2apb.StreamResponse]) error {
 	ctx := stream.Context()
-	sessionID := strings.TrimPrefix(strings.Split(metadata.ValueFromIncomingContext(ctx, "ate-target-actor")[0], "/")[1], "session-")
+	sessionID := strings.TrimPrefix(strings.Split(metadata.ValueFromIncomingContext(ctx, ax.TargetTaskHeader)[0], "/")[1], "session-")
 	r.mu.Lock()
 	// Release the lock before waiting for the test to allow streaming.
 	task, err := r.acceptMessage(ctx, req)
@@ -189,7 +190,7 @@ func (r *scheduledControllerRuntime) SendStreamingMessage(req *a2apb.SendMessage
 }
 
 func (r *scheduledControllerRuntime) acceptMessage(ctx context.Context, req *a2apb.SendMessageRequest) (*a2apb.Task, error) {
-	if got := metadata.ValueFromIncomingContext(ctx, "authorization"); len(got) != 1 || got[0] != "Bearer controller-test-credential" {
+	if got := metadata.ValueFromIncomingContext(ctx, ax.TargetTaskUIDHeader); len(got) != 1 || got[0] != "task-uid" {
 		return nil, status.Error(codes.Unauthenticated, "controller credential missing")
 	}
 	if len(metadata.ValueFromIncomingContext(ctx, "x-user-id")) != 0 {
@@ -199,7 +200,7 @@ func (r *scheduledControllerRuntime) acceptMessage(ctx context.Context, req *a2a
 	if err != nil {
 		return nil, err
 	}
-	sessionID := strings.TrimPrefix(strings.Split(metadata.ValueFromIncomingContext(ctx, "ate-target-actor")[0], "/")[1], "session-")
+	sessionID := strings.TrimPrefix(strings.Split(metadata.ValueFromIncomingContext(ctx, ax.TargetTaskHeader)[0], "/")[1], "session-")
 	current := a2atype.NewSubmittedTask(send.Message, send.Message)
 	initial, err := pbconv.ToProtoTask(current)
 	if err != nil {
@@ -279,7 +280,7 @@ func (r *scheduledControllerRuntime) CancelTask(ctx context.Context, req *a2apb.
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	sessionID := strings.TrimPrefix(strings.Split(metadata.ValueFromIncomingContext(ctx, "ate-target-actor")[0], "/")[1], "session-")
+	sessionID := strings.TrimPrefix(strings.Split(metadata.ValueFromIncomingContext(ctx, ax.TargetTaskHeader)[0], "/")[1], "session-")
 	task, _, err := r.store.GetVersionedSessionTask(ctx, sessionID, req.Id)
 	if err != nil {
 		return nil, err
@@ -330,8 +331,10 @@ func TestScheduledRunControllerThroughGRPC(t *testing.T) {
 			a2apb.RegisterA2AServiceServer(server, runtime)
 			go func() { _ = server.Serve(listener) }()
 			t.Cleanup(server.Stop)
-			authenticator := &scheduledControllerAuth{}
-			dialer, err := a2agateway.NewRuntimeDialer("http://"+listener.Addr().String(), authenticator)
+			conn, err := grpc.NewClient(listener.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+			require.NoError(t, err)
+			t.Cleanup(func() { conn.Close() })
+			dialer, err := a2agateway.NewRuntimeDialer(conn, scheduledRuntimeBindings{})
 			require.NoError(t, err)
 			workflow := &scheduledControllerWorkflow{store: store, failCleanup: tc.state == a2atype.TaskStateWorking}
 			created, err := client.CreateScheduledRun(owner, &apiv1alpha1.CreateScheduledRunRequest{
@@ -457,4 +460,11 @@ func (w *scheduledControllerWorkflow) finish(ctx context.Context, id string, kin
 		actorUID = "actor-" + id
 	}
 	return w.store.FinishSessionOperation(ctx, id, operation.ID, executor, authority, actorUID, "")
+}
+
+// Runtime placement is controlled here; transport uses the production AX dialer.
+type scheduledRuntimeBindings struct{}
+
+func (scheduledRuntimeBindings) GetAXBinding(_ context.Context, id string) (database.AXBinding, error) {
+	return database.AXBinding{Task: &ax.ResourceRef{Atespace: "team", Name: "session-" + id, Uid: "task-uid"}}, nil
 }

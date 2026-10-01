@@ -24,8 +24,8 @@ func TestE2ECLIAgentCatalogAndSessionLifecycle(t *testing.T) {
 		templateName := createInteractionTemplate(t, harness, startInteractionMock(t))
 		binary := kagentCLI(t)
 		baseArgs := []string{
-			"--api-url", "http://" + target,
-			"--gateway-url", "http://" + target,
+			"--api-url", "https://" + target,
+			"--gateway-url", "https://" + target,
 			"--namespace", "kagent",
 			"--user-id", "e2e",
 		}
@@ -102,8 +102,8 @@ func TestE2ECLISessionDiscoveryAndInvoke(t *testing.T) {
 		fixture := newInteractionFixture(t, harness, target, startInteractionMock(t))
 		binary := kagentCLI(t)
 		baseArgs := []string{
-			"--api-url", "http://" + target,
-			"--gateway-url", "http://" + target,
+			"--api-url", "https://" + target,
+			"--gateway-url", "https://" + target,
 			"--namespace", "kagent",
 			"--user-id", "e2e",
 		}

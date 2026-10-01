@@ -43,9 +43,9 @@ func TestSandboxTemplateCatalog(t *testing.T) {
 	resource := &v1alpha3.SandboxTemplate{Spec: v1alpha3.SandboxTemplateSpec{
 		Workload: v1alpha3.SandboxTemplateWorkload{Image: testHarnessImage},
 		Env:      []v1alpha3.RuntimeEnvVar{{Name: "LANG", Value: new("C.UTF-8")}},
-		Substrate: v1alpha3.RuntimeSubstratePolicy{
-			WorkerPoolRef:  corev1.LocalObjectReference{Name: "default"},
-			SnapshotPolicy: v1alpha3.RuntimeSnapshotPolicy{Location: "s3://snapshots"},
+		AX: v1alpha3.RuntimeAXPolicy{
+			TaskGroupRef:             corev1.LocalObjectReference{Name: "default"},
+			SnapshotLocationOverride: "s3://snapshots",
 		},
 	}}
 	request := &apiv1alpha1.CreateSandboxTemplateRequest{

@@ -9,8 +9,7 @@ import (
 	"testing/synctest"
 	"time"
 
-	atev1alpha1 "github.com/agent-substrate/substrate/pkg/api/v1alpha1"
-	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
+	ax "github.com/google/ax/pkg/apis/v1alpha1"
 	"github.com/google/uuid"
 	kagentfake "github.com/kagent-dev/kagent/go/api/clientset/versioned/fake"
 	apiv1alpha1 "github.com/kagent-dev/kagent/go/api/gen/kagent/api/v1alpha1"
@@ -19,6 +18,7 @@ import (
 	"github.com/kagent-dev/kagent/go/core/internal/dbtest"
 	v2translator "github.com/kagent-dev/kagent/go/core/internal/translator"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
@@ -48,16 +48,14 @@ func TestUnresolvedPoolReleasesAbandonedRevision(t *testing.T) {
 			store := database.NewClient(pool)
 			collections, harnesses := newPreparationTestCollections(t, "gvisor")
 			initial := collections.Reconciliations.List()[0]
-			templates := &fakeActorTemplates{template: proto.CloneOf(initial.Target.ActorTemplate)}
+			templates := &fakePreparedRuntimes{template: proto.CloneOf(initial.Target.Runtime)}
 			templates.template.Metadata.Uid = "gvisor-uid"
-			templates.template.Status = &ateapipb.ActorTemplateStatus{GoldenSnapshotStatus: &ateapipb.GoldenSnapshotStatus{
-				GoldenTag: &ateapipb.ObjectRef{Atespace: "ate-golden", Name: "golden"},
-			}}
+			templates.template.Phase = "Ready"
 			reconciler := &Reconciler{collections: collections, templates: templates, store: store}
 			require.NoError(t, reconciler.reconcileAgent(ctx, initial.ResourceName()))
 
 			updatedHarness := harnesses.List()[0].DeepCopy()
-			updatedHarness.Spec.Substrate.WorkerPoolRef.Name = "microvm"
+			updatedHarness.Spec.AX.TaskGroupRef.Name = "microvm"
 			harnesses.UpdateObject(updatedHarness)
 			waitFor(t, func() bool {
 				return collections.Reconciliations.GetKey(initial.ResourceName()).Target.RevisionID != initial.Target.RevisionID
@@ -67,7 +65,7 @@ func TestUnresolvedPoolReleasesAbandonedRevision(t *testing.T) {
 			require.NoError(t, reconciler.reconcileAgent(ctx, initial.ResourceName()))
 			if failed {
 				templates.template = proto.CloneOf(templates.template)
-				templates.template.Status = &ateapipb.ActorTemplateStatus{GoldenSnapshotStatus: &ateapipb.GoldenSnapshotStatus{ErrorMessage: "snapshot failed"}}
+				templates.template.Phase, templates.template.Message = "Failed", "snapshot failed"
 				require.NoError(t, reconciler.reconcileAgent(ctx, initial.ResourceName()))
 				waitFor(t, func() bool {
 					return collections.Reconciliations.GetKey(initial.ResourceName()).PreparationFailure != nil
@@ -78,20 +76,20 @@ func TestUnresolvedPoolReleasesAbandonedRevision(t *testing.T) {
 			require.Empty(t, unreferenced)
 
 			updatedHarness = updatedHarness.DeepCopy()
-			updatedHarness.Spec.Substrate.WorkerPoolRef.Name = "missing"
+			updatedHarness.Spec.AX.TaskGroupRef.Name = "missing"
 			harnesses.UpdateObject(updatedHarness)
 			waitFor(t, func() bool {
 				state := collections.Reconciliations.GetKey(initial.ResourceName())
-				return state.CompilationFailure != nil && state.CompilationFailure.Reason == "WorkerPoolNotFound"
+				return state.CompilationFailure != nil && state.CompilationFailure.Reason == "TaskGroupNotFound"
 			})
 			unresolved := collections.Reconciliations.GetKey(initial.ResourceName())
 			require.Nil(t, unresolved.Target)
 			for range 2 {
-				require.NoError(t, reconciler.reconcileAgent(ctx, initial.ResourceName()))
+				require.Equal(t, codes.NotFound, status.Code(errors.Unwrap(reconciler.reconcileAgent(ctx, initial.ResourceName()))))
 			}
 			require.Empty(t, collections.AgentRuntimeObservations.List())
 			require.Empty(t, unresolved.desiredRevision())
-			require.Equal(t, preparing.Target.ActorTemplate.GetMetadata().GetName(), templates.template.GetMetadata().GetName(), "unresolved inputs must not create compute")
+			require.Equal(t, preparing.Target.Runtime.GetMetadata().GetName(), templates.template.GetMetadata().GetName(), "unresolved inputs must not create compute")
 
 			// A delayed success for the abandoned preparation must not replace A.
 			abandoned, err := store.GetRuntimeRevision(ctx, preparing.Target.RevisionID.String())
@@ -120,7 +118,7 @@ func TestUnresolvedPoolReleasesAbandonedRevision(t *testing.T) {
 			require.NoError(t, err)
 
 			updatedHarness = updatedHarness.DeepCopy()
-			updatedHarness.Spec.Substrate.WorkerPoolRef.Name = "microvm"
+			updatedHarness.Spec.AX.TaskGroupRef.Name = "microvm"
 			harnesses.UpdateObject(updatedHarness)
 			waitFor(t, func() bool {
 				state := collections.Reconciliations.GetKey(initial.ResourceName())
@@ -136,16 +134,16 @@ func TestUnresolvedPoolReleasesAbandonedRevision(t *testing.T) {
 func TestPreparationErrorsPublishStatusAndRecover(t *testing.T) {
 	for _, test := range []struct {
 		name      string
-		templates fakeActorTemplates
+		templates fakePreparedRuntimes
 		store     fakeRuntimeRevisionStore
 		code      codes.Code
 	}{
-		{name: "missing sandbox config", templates: fakeActorTemplates{createErr: status.Error(codes.FailedPrecondition, `SandboxConfig "microvm" not found`)}, code: codes.FailedPrecondition},
-		{name: "wrong sandbox class", templates: fakeActorTemplates{createErr: status.Error(codes.FailedPrecondition, `SandboxConfig "microvm" has class "gvisor" but sandbox_config.sandbox_class is "microvm"`)}, code: codes.FailedPrecondition},
-		{name: "sensitive creation error", templates: fakeActorTemplates{createErr: status.Error(codes.FailedPrecondition, "private-backend-detail")}, code: codes.FailedPrecondition},
-		{name: "get failed", templates: fakeActorTemplates{getErr: status.Error(codes.Unavailable, "private-endpoint")}, code: codes.Unavailable},
-		{name: "get invalid argument", templates: fakeActorTemplates{getErr: status.Error(codes.InvalidArgument, "private-endpoint")}, code: codes.InvalidArgument},
-		{name: "atespace failed", templates: fakeActorTemplates{ensureErr: status.Error(codes.PermissionDenied, "private-credential")}, code: codes.PermissionDenied},
+		{name: "missing sandbox config", templates: fakePreparedRuntimes{createErr: status.Error(codes.FailedPrecondition, `SandboxConfig "microvm" not found`)}, code: codes.FailedPrecondition},
+		{name: "wrong sandbox class", templates: fakePreparedRuntimes{createErr: status.Error(codes.FailedPrecondition, `SandboxConfig "microvm" has class "gvisor" but sandbox_config.sandbox_class is "microvm"`)}, code: codes.FailedPrecondition},
+		{name: "sensitive creation error", templates: fakePreparedRuntimes{createErr: status.Error(codes.FailedPrecondition, "private-backend-detail")}, code: codes.FailedPrecondition},
+		{name: "get failed", templates: fakePreparedRuntimes{getErr: status.Error(codes.Unavailable, "private-endpoint")}, code: codes.Unavailable},
+		{name: "get invalid argument", templates: fakePreparedRuntimes{getErr: status.Error(codes.InvalidArgument, "private-endpoint")}, code: codes.InvalidArgument},
+		{name: "authorization failed", templates: fakePreparedRuntimes{getErr: status.Error(codes.PermissionDenied, "private-credential")}, code: codes.PermissionDenied},
 		{name: "pair store failed", store: fakeRuntimeRevisionStore{pairErr: errors.New("private-database-connection")}, code: codes.Unknown},
 		{name: "revision store failed", store: fakeRuntimeRevisionStore{revisionErr: errors.New("private-database-connection")}, code: codes.Unknown},
 	} {
@@ -178,26 +176,24 @@ func TestPreparationErrorsPublishStatusAndRecover(t *testing.T) {
 			require.Contains(t, ready.Message, test.code.String())
 			require.NotContains(t, ready.Message, "private-")
 			if test.code == codes.FailedPrecondition {
-				require.Contains(t, ready.Message, `SandboxConfig "microvm"`)
-				require.Contains(t, ready.Message, `spec.sandboxClass="microvm"`)
+				require.Contains(t, ready.Message, "AX runtime preparation failed")
+				require.NotContains(t, ready.Message, "SandboxConfig")
 			}
 			observation := collections.AgentRuntimeObservations.GetKey(initial.ResourceName())
 			require.Nil(t, observation.Template)
 			require.Equal(t, initial.Target.RevisionID, observation.RevisionID)
 			require.Error(t, reconciler.reconcileAgent(t.Context(), initial.ResourceName()), "publishing a failure must not prevent the next retry")
 
-			test.templates.ensureErr, test.templates.getErr, test.templates.createErr = nil, nil, nil
+			test.templates.getErr, test.templates.createErr = nil, nil
 			test.store.pairErr, test.store.revisionErr = nil, nil
 			require.NoError(t, reconciler.reconcileAgent(t.Context(), initial.ResourceName()))
 			waitFor(t, func() bool {
 				state := collections.Reconciliations.GetKey(initial.ResourceName())
-				return state.PreparationFailure == nil && state.ObservedActorTemplate != nil
+				return state.PreparationFailure == nil && state.ObservedRuntime != nil
 			})
 			require.Nil(t, collections.AgentRuntimeObservations.GetKey(initial.ResourceName()).Failure)
 			test.templates.template = proto.CloneOf(test.templates.template)
-			test.templates.template.Status = &ateapipb.ActorTemplateStatus{GoldenSnapshotStatus: &ateapipb.GoldenSnapshotStatus{
-				GoldenTag: &ateapipb.ObjectRef{Atespace: "ate-golden", Name: "golden"},
-			}}
+			test.templates.template.Phase = "Ready"
 			require.NoError(t, reconciler.reconcileAgent(t.Context(), initial.ResourceName()))
 			waitFor(t, func() bool {
 				harnessStatus := collections.AgentStatuses.List()[0].Status
@@ -209,31 +205,19 @@ func TestPreparationErrorsPublishStatusAndRecover(t *testing.T) {
 }
 
 func TestRuntimePreparationFailureSanitizesErrors(t *testing.T) {
-	for _, test := range []struct {
-		name       string
-		class      atev1alpha1.SandboxClass
-		configName string
-		wantClass  string
-	}{
-		{name: "default", configName: "gvisor-default", wantClass: "gvisor"},
-		{name: "gvisor", class: atev1alpha1.SandboxClassGvisor, configName: "gvisor-default", wantClass: "gvisor"},
-		{name: "microvm", class: atev1alpha1.SandboxClassMicroVM, configName: "microvm", wantClass: "microvm"},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			failure := runtimePreparationFailure(status.Error(codes.FailedPrecondition, "private-backend-detail"), test.configName, test.class)
-			require.Equal(t, kagentv1alpha3.AgentConditionReady, failure.Condition)
-			require.True(t, failure.Retryable)
-			require.Contains(t, failure.Message, `SandboxConfig "`+test.configName+`"`)
-			require.Contains(t, failure.Message, `spec.sandboxClass="`+test.wantClass+`"`)
-			require.NotContains(t, failure.Message, "private-backend-detail")
-		})
+	for _, code := range []codes.Code{codes.FailedPrecondition, codes.Unavailable, codes.PermissionDenied} {
+		failure := runtimePreparationFailure(status.Error(code, "private-backend-detail"))
+		require.Equal(t, kagentv1alpha3.AgentConditionReady, failure.Condition)
+		require.True(t, failure.Retryable)
+		require.Contains(t, failure.Message, "AX runtime preparation failed")
+		require.NotContains(t, failure.Message, "private-backend-detail")
 	}
 }
 
 func TestPreparationRevisionIsolation(t *testing.T) {
 	collections, harnesses := newPreparationTestCollections(t, "microvm")
 	initial := collections.Reconciliations.List()[0]
-	templates := &fakeActorTemplates{createErr: status.Error(codes.FailedPrecondition, `SandboxConfig "microvm" not found`)}
+	templates := &fakePreparedRuntimes{createErr: status.Error(codes.FailedPrecondition, `SandboxConfig "microvm" not found`)}
 	reconciler := &Reconciler{collections: collections, templates: templates, store: &fakeRuntimeRevisionStore{}}
 	require.Error(t, reconciler.reconcileAgent(t.Context(), initial.ResourceName()))
 	waitFor(t, func() bool {
@@ -263,10 +247,10 @@ func TestPreparationRevisionIsolation(t *testing.T) {
 func TestPreparationQueueAndPollerBackoff(t *testing.T) {
 	for _, test := range []struct {
 		name      string
-		templates fakeActorTemplates
+		templates fakePreparedRuntimes
 		store     fakeRuntimeRevisionStore
 	}{
-		{name: "missing sandbox config", templates: fakeActorTemplates{createErr: status.Error(codes.FailedPrecondition, "missing config")}},
+		{name: "missing sandbox config", templates: fakePreparedRuntimes{createErr: status.Error(codes.FailedPrecondition, "missing config")}},
 		{name: "revision being collected", store: fakeRuntimeRevisionStore{pairErr: database.ErrObjectDeleting}},
 		{name: "persistence unavailable", store: fakeRuntimeRevisionStore{revisionErr: errors.New("database unavailable")}},
 	} {
@@ -318,9 +302,7 @@ func TestPreparationQueueAndPollerBackoff(t *testing.T) {
 					require.NotNil(t, test.templates.template)
 					require.False(t, test.store.markedSuccessful)
 					test.templates.template = proto.CloneOf(test.templates.template)
-					test.templates.template.Status = &ateapipb.ActorTemplateStatus{GoldenSnapshotStatus: &ateapipb.GoldenSnapshotStatus{
-						GoldenTag: &ateapipb.ObjectRef{Atespace: "ate-golden", Name: "golden"},
-					}}
+					test.templates.template.Phase = "Ready"
 				})
 				time.Sleep(time.Second)
 				synctest.Wait()
@@ -347,12 +329,13 @@ func TestPreparationQueueAndPollerBackoff(t *testing.T) {
 // Waiting for quiescence synchronizes worker writes with test reads, but test
 // mutations also need synchronization with the next timer-driven attempt.
 type preparationTestBackend struct {
+	ax.AXClient
 	mu        sync.Mutex
-	templates *fakeActorTemplates
+	templates *fakePreparedRuntimes
 	store     *fakeRuntimeRevisionStore
 }
 
-var _ actorTemplateClient = (*preparationTestBackend)(nil)
+var _ ax.AXClient = (*preparationTestBackend)(nil)
 var _ runtimeRevisionStore = (*preparationTestBackend)(nil)
 
 func (p *preparationTestBackend) inspect(f func()) {
@@ -361,22 +344,20 @@ func (p *preparationTestBackend) inspect(f func()) {
 	f()
 }
 
-func (p *preparationTestBackend) EnsureAtespace(ctx context.Context, atespace string) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.templates.EnsureAtespace(ctx, atespace)
+func (p *preparationTestBackend) GetTaskGroup(ctx context.Context, req *ax.GetTaskGroupRequest, opts ...grpc.CallOption) (*ax.TaskGroup, error) {
+	// This fixture controls preparation only; group state is supplied by its KRT inputs.
+	return nil, status.Error(codes.Unavailable, "group observation unavailable in preparation fixture")
 }
 
-func (p *preparationTestBackend) GetActorTemplate(ctx context.Context, atespace, name string) (*ateapipb.ActorTemplate, error) {
+func (p *preparationTestBackend) GetPreparedRuntime(ctx context.Context, req *ax.GetPreparedRuntimeRequest, opts ...grpc.CallOption) (*ax.PreparedRuntime, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.templates.GetActorTemplate(ctx, atespace, name)
+	return p.templates.GetPreparedRuntime(ctx, req, opts...)
 }
-
-func (p *preparationTestBackend) CreateActorTemplate(ctx context.Context, template *ateapipb.ActorTemplate) (*ateapipb.ActorTemplate, error) {
+func (p *preparationTestBackend) PrepareRuntime(ctx context.Context, req *ax.PrepareRuntimeRequest, opts ...grpc.CallOption) (*ax.PreparedRuntime, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.templates.CreateActorTemplate(ctx, template)
+	return p.templates.PrepareRuntime(ctx, req, opts...)
 }
 
 func (p *preparationTestBackend) UpsertAgentDefinition(ctx context.Context, definition database.AgentDefinition) error {
@@ -401,7 +382,7 @@ func TestPreparationDesiredChangesBypassBackoff(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		collections, harnesses := newPreparationTestCollections(t, "microvm")
 		initial := collections.Reconciliations.List()[0]
-		templates := &fakeActorTemplates{createErr: status.Error(codes.FailedPrecondition, "missing config")}
+		templates := &fakePreparedRuntimes{createErr: status.Error(codes.FailedPrecondition, "missing config")}
 		store := &fakeRuntimeRevisionStore{}
 		r := newReconciler(collections, templates, store, kagentfake.NewSimpleClientset(initial.Agent.DeepCopy()).ApiV1alpha3())
 		ctx, cancel := context.WithCancel(t.Context())
@@ -439,21 +420,21 @@ func TestPreparationDesiredChangesBypassBackoff(t *testing.T) {
 }
 
 func TestPreparationTerminalFailures(t *testing.T) {
-	for _, reason := range []string{"ActorTemplateRejected", "ActorTemplateConflict", "ActorTemplateFailed"} {
+	for _, reason := range []string{"PreparedRuntimeRejected", "PreparedRuntimeConflict", "PreparedRuntimeFailed"} {
 		t.Run(reason, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				collections, harnesses := newPreparationTestCollections(t, "microvm")
 				initial := collections.Reconciliations.List()[0]
-				templates := &fakeActorTemplates{}
+				templates := &fakePreparedRuntimes{}
 				switch reason {
-				case "ActorTemplateRejected":
+				case "PreparedRuntimeRejected":
 					templates.createErr = status.Error(codes.InvalidArgument, "private-config-value")
-				case "ActorTemplateConflict":
-					templates.template = proto.CloneOf(initial.Target.ActorTemplate)
-					templates.template.Containers[0].Args = []string{"unexpected"}
-				case "ActorTemplateFailed":
-					templates.template = proto.CloneOf(initial.Target.ActorTemplate)
-					templates.template.Status = &ateapipb.ActorTemplateStatus{GoldenSnapshotStatus: &ateapipb.GoldenSnapshotStatus{ErrorMessage: "snapshot failed"}}
+				case "PreparedRuntimeConflict":
+					templates.template = proto.CloneOf(initial.Target.Runtime)
+					templates.template.Spec.Args = []string{"unexpected"}
+				case "PreparedRuntimeFailed":
+					templates.template = proto.CloneOf(initial.Target.Runtime)
+					templates.template.Phase, templates.template.Message = "Failed", "snapshot failed"
 				}
 				store := &fakeRuntimeRevisionStore{}
 				statusClient := kagentfake.NewSimpleClientset(initial.Agent.DeepCopy()).ApiV1alpha3()
@@ -511,11 +492,11 @@ func TestInvalidActorTemplateHasNoCompiledTarget(t *testing.T) {
 		return collections.Reconciliations.GetKey(initial.ResourceName()).CompilationFailure != nil
 	})
 	state := collections.Reconciliations.GetKey(initial.ResourceName())
-	require.Equal(t, "ActorTemplateInvalid", state.CompilationFailure.Reason)
+	require.Equal(t, "PreparedRuntimeInvalid", state.CompilationFailure.Reason)
 	require.Nil(t, state.Target, "a revision and digest must not be published when ActorTemplate construction fails")
 	require.Nil(t, state.PreparationFailure)
 	store := &fakeRuntimeRevisionStore{}
-	templates := &fakeActorTemplates{getErr: errors.New("Substrate must not be called for an invalid target")}
+	templates := &fakePreparedRuntimes{getErr: errors.New("Substrate must not be called for an invalid target")}
 	r := &Reconciler{collections: collections, templates: templates, store: store}
 	require.NoError(t, r.reconcileAgent(t.Context(), initial.ResourceName()))
 	require.Empty(t, store.pair.DesiredRevision)
@@ -525,7 +506,7 @@ func TestInvalidActorTemplateHasNoCompiledTarget(t *testing.T) {
 	require.Empty(t, agentStatus.DesiredRevision)
 	require.Equal(t, initial.Target.RevisionID.String(), agentStatus.LatestSuccessfulRevision)
 	compatible := apimeta.FindStatusCondition(agentStatus.Conditions, kagentv1alpha3.AgentConditionCompatible)
-	require.Equal(t, "ActorTemplateInvalid", compatible.Reason)
+	require.Equal(t, "PreparedRuntimeInvalid", compatible.Reason)
 }
 
 func newPreparationTestCollections(t *testing.T, workerPool string) (Collections, krt.StaticCollection[*kagentv1alpha3.Harness]) {
@@ -537,14 +518,14 @@ func newPreparationTestCollections(t *testing.T, workerPool string) (Collections
 	runtimeHarness.Spec.BYO = &kagentv1alpha3.BYOHarness{}
 	runtimeHarness.Spec.Workload.Image = "example.com/agent@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	runtimeHarness.Spec.Workload.Command = []string{"/agent"}
-	runtimeHarness.Spec.Substrate = kagentv1alpha3.RuntimeSubstratePolicy{
-		WorkerPoolRef: corev1.LocalObjectReference{Name: workerPool}, SnapshotPolicy: kagentv1alpha3.RuntimeSnapshotPolicy{Location: "snapshots"},
+	runtimeHarness.Spec.AX = kagentv1alpha3.RuntimeAXPolicy{
+		TaskGroupRef: corev1.LocalObjectReference{Name: workerPool}, SnapshotLocationOverride: "s3://snapshots",
 	}
 	harnesses := krt.NewStaticCollection(nil, []*kagentv1alpha3.Harness{runtimeHarness}, opts.WithName("Harnesses")...)
 	mock := krttest.NewMock(t, []any{
 		template,
-		&atev1alpha1.WorkerPool{ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "gvisor"}, Spec: atev1alpha1.WorkerPoolSpec{SandboxClass: atev1alpha1.SandboxClassGvisor}},
-		&atev1alpha1.WorkerPool{ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "microvm"}, Spec: atev1alpha1.WorkerPoolSpec{SandboxClass: atev1alpha1.SandboxClassMicroVM}},
+		testTaskGroup("team-a", "gvisor", "gvisor-uid"),
+		testTaskGroup("team-a", "microvm", "microvm-uid"),
 	})
 	collections := Collections{
 		AgentTemplates:           krttest.GetMockCollection[*kagentv1alpha3.AgentTemplate](mock),
@@ -553,7 +534,7 @@ func newPreparationTestCollections(t *testing.T, workerPool string) (Collections
 		RemoteMCPServers:         krttest.GetMockCollection[*kagentv1alpha3.RemoteMCPServer](mock),
 		ConfigMaps:               krttest.GetMockCollection[*corev1.ConfigMap](mock),
 		Secrets:                  krttest.GetMockCollection[*corev1.Secret](mock),
-		WorkerPools:              krttest.GetMockCollection[*atev1alpha1.WorkerPool](mock),
+		TaskGroups:               krt.NewStaticCollection(nil, krttest.GetMockCollection[v2translator.TaskGroupObservation](mock).List(), opts.WithName("AXTaskGroups")...),
 		AgentRuntimeObservations: krt.NewStaticCollection[AgentRuntimeObservation](nil, nil, opts.WithName("AgentRuntimeObservations")...),
 		ModelConfigStatuses:      krttest.GetMockCollection[krt.ObjectWithStatus[*kagentv1alpha3.ModelConfig, kagentv1alpha3.ModelConfigStatus]](mock),
 	}
@@ -561,7 +542,7 @@ func newPreparationTestCollections(t *testing.T, workerPool string) (Collections
 	collections.Reconciliations = newAgentReconciliations(collections.Agents, v2translator.Collections{
 		Harnesses: collections.Harnesses, AgentTemplates: collections.AgentTemplates, ResolvedModelConfigs: collections.ResolvedModelConfigs,
 		RemoteMCPServers: collections.RemoteMCPServers, ConfigMaps: collections.ConfigMaps,
-		Secrets: collections.Secrets, WorkerPools: collections.WorkerPools,
+		Secrets: collections.Secrets, TaskGroups: collections.TaskGroups,
 	}, collections.AgentRuntimeObservations, opts)
 	collections.AgentStatuses = newAgentStatuses(collections.Agents, collections.Reconciliations, opts)
 	waitFor(t, func() bool {

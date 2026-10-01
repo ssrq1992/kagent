@@ -8,10 +8,10 @@ import (
 	"strings"
 	"testing"
 
-	atev1alpha1 "github.com/agent-substrate/substrate/pkg/api/v1alpha1"
+	ax "github.com/google/ax/pkg/apis/v1alpha1"
 	"github.com/kagent-dev/kagent/go/api/adk"
 	"github.com/kagent-dev/kagent/go/api/v1alpha3"
-	"github.com/kagent-dev/kagent/go/core/internal/substrate"
+	"github.com/kagent-dev/kagent/go/core/internal/axruntime"
 	v2translator "github.com/kagent-dev/kagent/go/core/internal/translator"
 	byotranslator "github.com/kagent-dev/kagent/go/core/internal/translator/byo"
 	claudetranslator "github.com/kagent-dev/kagent/go/core/internal/translator/claude"
@@ -56,8 +56,8 @@ func TestCompileAgentPreservesWorkloadOverrides(t *testing.T) {
 						Image:   "example.com/runtime@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 						Command: slices.Clone(tt.command), Args: slices.Clone(tt.args),
 					},
-					Substrate: v1alpha3.RuntimeSubstratePolicy{
-						WorkerPoolRef: corev1.LocalObjectReference{Name: "default"}, SnapshotPolicy: v1alpha3.RuntimeSnapshotPolicy{Location: "snapshots"},
+					AX: v1alpha3.RuntimeAXPolicy{
+						TaskGroupRef: corev1.LocalObjectReference{Name: "default"}, SnapshotLocationOverride: "s3://snapshots",
 					},
 				},
 			}
@@ -85,10 +85,9 @@ func TestCompileAgentPreservesWorkloadOverrides(t *testing.T) {
 				require.NoError(t, err)
 				require.NotEqual(t, defaultID, revisionID, "workload overrides must affect revision identity")
 			}
-			actorTemplate, err := substrate.ActorTemplateForRevision(&result.Revision, revisionID)
+			actorTemplate, err := axruntime.RuntimeForRevision(&result.Revision, revisionID)
 			require.NoError(t, err)
-			require.Len(t, actorTemplate.Containers, 1)
-			container := actorTemplate.Containers[0]
+			container := actorTemplate.Spec
 			require.Equal(t, tt.command, container.Command)
 			require.Equal(t, tt.args, container.Args)
 
@@ -121,8 +120,8 @@ func TestCompileAgentPinsAgentPluginSources(t *testing.T) {
 				Image:   "example.com/kagent@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 				Command: []string{"kagent-adk", "static"}, Args: []string{"--host", "0.0.0.0"},
 			},
-			Substrate: v1alpha3.RuntimeSubstratePolicy{
-				WorkerPoolRef: corev1.LocalObjectReference{Name: "default"}, SnapshotPolicy: v1alpha3.RuntimeSnapshotPolicy{Location: "snapshots"},
+			AX: v1alpha3.RuntimeAXPolicy{
+				TaskGroupRef: corev1.LocalObjectReference{Name: "default"}, SnapshotLocationOverride: "s3://snapshots",
 			},
 		},
 	}
@@ -200,8 +199,11 @@ func compiler(t *testing.T, objects ...any) *v2translator.Compiler {
 	})
 }
 
-func defaultWorkerPool() *atev1alpha1.WorkerPool {
-	return &atev1alpha1.WorkerPool{ObjectMeta: metav1.ObjectMeta{Namespace: "test", Name: "default"}}
+func taskGroup(space, name, uid string) v2translator.TaskGroupObservation {
+	return v2translator.TaskGroupObservation{Group: &ax.TaskGroup{Metadata: &ax.ObjectMeta{Atespace: space, Name: name, Uid: uid}}}
+}
+func defaultWorkerPool() v2translator.TaskGroupObservation {
+	return taskGroup("test", "default", "default-uid")
 }
 
 func mockCollections(t *testing.T, objects ...any) v2translator.Collections {
@@ -213,7 +215,7 @@ func mockCollections(t *testing.T, objects ...any) v2translator.Collections {
 		RemoteMCPServers: krttest.GetMockCollection[*v1alpha3.RemoteMCPServer](mock),
 		ConfigMaps:       krttest.GetMockCollection[*corev1.ConfigMap](mock),
 		Secrets:          krttest.GetMockCollection[*corev1.Secret](mock),
-		WorkerPools:      krttest.GetMockCollection[*atev1alpha1.WorkerPool](mock),
+		TaskGroups:       krttest.GetMockCollection[v2translator.TaskGroupObservation](mock),
 	}
 	models := krttest.GetMockCollection[*v1alpha3.ModelConfig](mock)
 	resolved := make([]any, 0, len(models.List()))
@@ -227,7 +229,7 @@ func mockCollections(t *testing.T, objects ...any) v2translator.Collections {
 	return collections
 }
 
-func TestCompileAgentResolvesWorkerPoolSandboxClass(t *testing.T) {
+func TestCompileAgentResolvesTaskGroupUID(t *testing.T) {
 	for _, harnessType := range []v2translator.HarnessType{
 		v2translator.HarnessTypeKagent, v2translator.HarnessTypeCodex, v2translator.HarnessTypeClaude, v2translator.HarnessTypeBYO,
 	} {
@@ -237,8 +239,8 @@ func TestCompileAgentResolvesWorkerPoolSandboxClass(t *testing.T) {
 				Spec: v1alpha3.HarnessSpec{
 
 					Workload: v1alpha3.HarnessWorkload{Image: "example.com/agent@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
-					Substrate: v1alpha3.RuntimeSubstratePolicy{
-						WorkerPoolRef: corev1.LocalObjectReference{Name: "selected"}, SnapshotPolicy: v1alpha3.RuntimeSnapshotPolicy{Location: "snapshots"},
+					AX: v1alpha3.RuntimeAXPolicy{
+						TaskGroupRef: corev1.LocalObjectReference{Name: "selected"}, SnapshotLocationOverride: "s3://snapshots",
 					},
 				},
 			}
@@ -268,28 +270,17 @@ func TestCompileAgentResolvesWorkerPoolSandboxClass(t *testing.T) {
 			var baseline *v2translator.CompileResult
 			var defaultDigest v2translator.RevisionID
 			for _, tt := range []struct {
-				name    string
-				class   atev1alpha1.SandboxClass
-				missing bool
-			}{
-				{name: "default"},
-				{name: "explicit gvisor", class: atev1alpha1.SandboxClassGvisor},
-				{name: "microvm", class: atev1alpha1.SandboxClassMicroVM},
-				{name: "back to gvisor", class: atev1alpha1.SandboxClassGvisor},
-				{name: "unsupported", class: "unsupported"},
-				{name: "missing", missing: true},
-			} {
+				name, uid string
+				missing   bool
+			}{{name: "original", uid: "uid-one"}, {name: "replacement", uid: "uid-two"}, {name: "original again", uid: "uid-one"}, {name: "missing", missing: true}} {
 				t.Run(tt.name, func(t *testing.T) {
-					pool := &atev1alpha1.WorkerPool{
-						ObjectMeta: metav1.ObjectMeta{Namespace: "test", Name: "selected"},
-						Spec:       atev1alpha1.WorkerPoolSpec{SandboxClass: tt.class},
-					}
-					originalPool := pool.DeepCopy()
+					pool := taskGroup("test", "selected", tt.uid)
+					originalPool := taskGroup("test", "selected", tt.uid)
 					objects := []any{
 						model,
 						&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: "test", Name: "model-auth"}, Data: map[string][]byte{"api-key": []byte("secret")}},
-						&atev1alpha1.WorkerPool{ObjectMeta: metav1.ObjectMeta{Namespace: "other", Name: "selected"}, Spec: atev1alpha1.WorkerPoolSpec{SandboxClass: atev1alpha1.SandboxClassMicroVM}},
-						&atev1alpha1.WorkerPool{ObjectMeta: metav1.ObjectMeta{Namespace: "test", Name: "unselected"}, Spec: atev1alpha1.WorkerPoolSpec{SandboxClass: atev1alpha1.SandboxClassMicroVM}},
+						taskGroup("other", "selected", "unselected-uid"),
+						taskGroup("test", "unselected", "unselected-uid"),
 					}
 					if !tt.missing {
 						objects = append(objects, pool)
@@ -299,35 +290,30 @@ func TestCompileAgentResolvesWorkerPoolSandboxClass(t *testing.T) {
 					require.Equal(t, originalTemplate, template)
 					require.Equal(t, originalPool, pool)
 					if tt.missing {
-						var missing *v2translator.WorkerPoolNotFoundError
+						var missing *v2translator.TaskGroupNotFoundError
 						require.ErrorAs(t, err, &missing)
-						require.Equal(t, types.NamespacedName{Namespace: "test", Name: "selected"}, missing.WorkerPool)
-						require.EqualError(t, err, `WorkerPool "test/selected" not found`)
+						require.Equal(t, types.NamespacedName{Namespace: "test", Name: "selected"}, missing.TaskGroup)
+						require.EqualError(t, err, `TaskGroup "test/selected" not found`)
 						require.Nil(t, result, "unresolved capacity must not return a partial revision")
 						return
 					}
 					require.NoError(t, err)
-					require.Equal(t, tt.class, result.SandboxClass)
-					require.Equal(t, "selected", result.WorkerPoolName)
+					require.Equal(t, tt.uid, result.GroupRef.Uid)
+					require.Equal(t, "selected", result.TaskGroupName)
 					require.Equal(t, "test", result.Namespace)
 					digest, err := result.Digest()
-					if tt.class == "unsupported" {
-						require.EqualError(t, err, `unsupported sandbox class "unsupported"`)
-						require.True(t, digest.IsZero())
-						return
-					}
 					require.NoError(t, err)
 					if baseline == nil {
 						baseline, defaultDigest = result, digest
 					}
-					if tt.class == atev1alpha1.SandboxClassMicroVM {
+					if tt.uid == "uid-two" {
 						require.NotEqual(t, defaultDigest, digest)
 					} else {
 						require.Equal(t, defaultDigest, digest)
 					}
 					expected := *baseline
-					expected.SandboxClass = tt.class
-					require.Equal(t, expected, *result, "sandbox selection must not change other compiled inputs or warnings")
+					expected.GroupRef = result.GroupRef
+					require.Equal(t, expected, *result, "TaskGroup selection must not change other compiled inputs or warnings")
 				})
 			}
 		})
@@ -342,7 +328,7 @@ func TestCompileAgentStructuredOutput(t *testing.T) {
 				Memory:     &v1alpha3.KagentHarnessMemory{ModelConfigRef: corev1.LocalObjectReference{Name: "default-model"}, TTLDays: 7},
 				Compaction: &v1alpha3.KagentHarnessCompaction{CompactionInterval: new(5)},
 			},
-			Substrate: v1alpha3.RuntimeSubstratePolicy{WorkerPoolRef: corev1.LocalObjectReference{Name: "default"}},
+			AX: v1alpha3.RuntimeAXPolicy{TaskGroupRef: corev1.LocalObjectReference{Name: "default"}},
 		},
 	}
 	schema := `{"type":"object","properties":{"answer":{"type":"integer"}},"required":["answer"],"additionalProperties":false}`
@@ -451,8 +437,8 @@ func TestCompilerAcceptsExternalHarnessCompiler(t *testing.T) {
 	harness := &v1alpha3.Harness{
 		ObjectMeta: metav1.ObjectMeta{Name: "codex", Namespace: "test"},
 		Spec: v1alpha3.HarnessSpec{
-			Codex:     &v1alpha3.CodexHarness{},
-			Substrate: v1alpha3.RuntimeSubstratePolicy{WorkerPoolRef: corev1.LocalObjectReference{Name: "default"}},
+			Codex: &v1alpha3.CodexHarness{},
+			AX:    v1alpha3.RuntimeAXPolicy{TaskGroupRef: corev1.LocalObjectReference{Name: "default"}},
 		},
 	}
 	template := &v1alpha3.AgentTemplate{ObjectMeta: metav1.ObjectMeta{Name: "assistant", Namespace: "test"}, Spec: v1alpha3.AgentTemplateSpec{ModelConfig: &corev1.LocalObjectReference{Name: "default-model"}}}
@@ -510,8 +496,8 @@ func TestCompilerRejectsUnusableModelConfigBeforeHarnessCompiler(t *testing.T) {
 func TestCompilerPermitsBYOWithoutModelConfig(t *testing.T) {
 	adapter := &testHarnessCompiler{}
 	harness := &v1alpha3.Harness{ObjectMeta: metav1.ObjectMeta{Name: "byo", Namespace: "test"}, Spec: v1alpha3.HarnessSpec{
-		BYO:       &v1alpha3.BYOHarness{},
-		Substrate: v1alpha3.RuntimeSubstratePolicy{WorkerPoolRef: corev1.LocalObjectReference{Name: "default"}},
+		BYO: &v1alpha3.BYOHarness{},
+		AX:  v1alpha3.RuntimeAXPolicy{TaskGroupRef: corev1.LocalObjectReference{Name: "default"}},
 	}}
 	template := &v1alpha3.AgentTemplate{ObjectMeta: metav1.ObjectMeta{Name: "assistant", Namespace: "test"}}
 
@@ -551,9 +537,9 @@ func TestCompileAgentInjectsCredentialsAtGateway(t *testing.T) {
 			Kagent: &v1alpha3.KagentHarness{},
 
 			Workload: v1alpha3.HarnessWorkload{Image: "example.com/kagent@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
-			Substrate: v1alpha3.RuntimeSubstratePolicy{
-				WorkerPoolRef:  corev1.LocalObjectReference{Name: "default"},
-				SnapshotPolicy: v1alpha3.RuntimeSnapshotPolicy{Location: "snapshots"},
+			AX: v1alpha3.RuntimeAXPolicy{
+				TaskGroupRef:             corev1.LocalObjectReference{Name: "default"},
+				SnapshotLocationOverride: "s3://snapshots",
 			},
 		},
 	}
@@ -630,9 +616,9 @@ func TestCompileAgentForwardsOtelEnvironment(t *testing.T) {
 			Kagent: &v1alpha3.KagentHarness{},
 
 			Workload: v1alpha3.HarnessWorkload{Image: "example.com/kagent@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
-			Substrate: v1alpha3.RuntimeSubstratePolicy{
-				WorkerPoolRef:  corev1.LocalObjectReference{Name: "default"},
-				SnapshotPolicy: v1alpha3.RuntimeSnapshotPolicy{Location: "snapshots"},
+			AX: v1alpha3.RuntimeAXPolicy{
+				TaskGroupRef:             corev1.LocalObjectReference{Name: "default"},
+				SnapshotLocationOverride: "s3://snapshots",
 			},
 		},
 	}
@@ -676,9 +662,9 @@ func TestCompileAgentSharedADKConfig(t *testing.T) {
 	harness := &v1alpha3.Harness{
 		ObjectMeta: metav1.ObjectMeta{Name: "kagent", Namespace: "test"},
 		Spec: v1alpha3.HarnessSpec{
-			Kagent:    &v1alpha3.KagentHarness{},
-			Workload:  v1alpha3.HarnessWorkload{Image: "example.com/kagent@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
-			Substrate: v1alpha3.RuntimeSubstratePolicy{WorkerPoolRef: corev1.LocalObjectReference{Name: "default"}, SnapshotPolicy: v1alpha3.RuntimeSnapshotPolicy{Location: "snapshots"}},
+			Kagent:   &v1alpha3.KagentHarness{},
+			Workload: v1alpha3.HarnessWorkload{Image: "example.com/kagent@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+			AX:       v1alpha3.RuntimeAXPolicy{TaskGroupRef: corev1.LocalObjectReference{Name: "default"}, SnapshotLocationOverride: "s3://snapshots"},
 		},
 	}
 	child := &v1alpha3.AgentTemplate{
@@ -827,7 +813,7 @@ func TestCompileAgentInlineAndReferencedConfiguration(t *testing.T) {
 	child := &v1alpha3.AgentTemplate{ObjectMeta: metav1.ObjectMeta{Namespace: "test", Name: "child"}, Spec: v1alpha3.AgentTemplateSpec{ModelConfig: &corev1.LocalObjectReference{Name: "default-model"}, SystemPrompt: "review security"}}
 	harness := &v1alpha3.Harness{ObjectMeta: metav1.ObjectMeta{Namespace: "test", Name: "runtime", UID: "harness-uid"}, Spec: v1alpha3.HarnessSpec{
 		Kagent: &v1alpha3.KagentHarness{}, Workload: v1alpha3.HarnessWorkload{Image: "example.com/agent@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
-		Substrate: v1alpha3.RuntimeSubstratePolicy{WorkerPoolRef: corev1.LocalObjectReference{Name: "default"}, SnapshotPolicy: v1alpha3.RuntimeSnapshotPolicy{Location: "snapshots"}},
+		AX: v1alpha3.RuntimeAXPolicy{TaskGroupRef: corev1.LocalObjectReference{Name: "default"}, SnapshotLocationOverride: "s3://snapshots"},
 	}}
 	for _, tt := range []struct {
 		name                          string
@@ -907,8 +893,8 @@ func TestCompileAgentRuntimeIdentity(t *testing.T) {
 			harness := &v1alpha3.Harness{
 				ObjectMeta: metav1.ObjectMeta{Namespace: "test", Name: "shared-runtime"},
 				Spec: v1alpha3.HarnessSpec{
-					Workload:  v1alpha3.HarnessWorkload{Image: "example.com/runtime@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
-					Substrate: v1alpha3.RuntimeSubstratePolicy{WorkerPoolRef: corev1.LocalObjectReference{Name: "default"}, SnapshotPolicy: v1alpha3.RuntimeSnapshotPolicy{Location: "snapshots"}},
+					Workload: v1alpha3.HarnessWorkload{Image: "example.com/runtime@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+					AX:       v1alpha3.RuntimeAXPolicy{TaskGroupRef: corev1.LocalObjectReference{Name: "default"}, SnapshotLocationOverride: "s3://snapshots"},
 				},
 			}
 			switch kind {

@@ -35,3 +35,7 @@ func (s *taskStoreServer) ListTasks(ctx context.Context, req *apiv1alpha1.TaskSt
 func (s *taskStoreServer) SettleTask(ctx context.Context, req *apiv1alpha1.TaskStoreServiceSettleTaskRequest) (*apiv1alpha1.TaskStoreServiceSettleTaskResponse, error) {
 	return s.service.SettleTask(ctx, req)
 }
+
+func (s *taskStoreServer) ResolveSession(ctx context.Context, req *apiv1alpha1.TaskStoreServiceResolveSessionRequest) (*apiv1alpha1.TaskStoreServiceResolveSessionResponse, error) {
+	return s.service.ResolveSession(ctx, req)
+}

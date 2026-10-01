@@ -1,7 +1,6 @@
 """Pinned SDK tests over gRPC; PostgreSQL contract coverage lives in Go."""
 
 import asyncio
-from pathlib import Path
 from uuid import uuid4
 
 import grpc
@@ -15,7 +14,7 @@ from kagent.api.v1alpha1 import task_store_pb2 as storepb
 from kagent.api.v1alpha1 import task_store_pb2_grpc as storerpc
 
 from kagent.core._grpc import AsyncControllerClient
-from kagent.core.a2a._task_store import KAgentRequestHandler, KAgentTaskStore
+from kagent.core.a2a._task_store import _PRODUCER, KAgentRequestHandler, KAgentTaskStore
 
 
 class Storage(storerpc.TaskStoreServiceServicer):
@@ -27,6 +26,7 @@ class Storage(storerpc.TaskStoreServiceServicer):
         self.lose_save = True
         self.reject_saves = False
         self.reject_updates = False
+        self.reject_identity_after_create = False
         self.update_started = asyncio.Event()
         self.update_release = asyncio.Event()
         self.update_release.set()
@@ -35,6 +35,12 @@ class Storage(storerpc.TaskStoreServiceServicer):
         self.creation_release = asyncio.Event()
         self.creation_release.set()
         self.dispatch_ids = []
+
+    async def ResolveSession(self, request, context):
+        assert "x-kagent-insecure-runtime-identity" not in dict(context.invocation_metadata())
+        if self.reject_identity_after_create and self.version > 0:
+            await context.abort(grpc.StatusCode.UNAUTHENTICATED, "runtime credential revoked")
+        return storepb.TaskStoreServiceResolveSessionResponse(session_id=self.session_id)
 
     async def CreateTask(self, request, context):
         assert request.session_id == self.session_id
@@ -61,9 +67,7 @@ class Storage(storerpc.TaskStoreServiceServicer):
         self.dispatch_ids.append(request.dispatch_id)
         if self.reject_saves:
             await context.abort(grpc.StatusCode.UNAVAILABLE, "storage outage")
-        assert dict(context.invocation_metadata())["x-kagent-insecure-runtime-identity"] == (
-            f"team-a/session-{self.session_id}/actor-uid"
-        )
+        assert "x-kagent-insecure-runtime-identity" not in dict(context.invocation_metadata())
         payload = request.SerializeToString(deterministic=True)
         if key in self.receipts:
             digest, version = self.receipts[key]
@@ -196,19 +200,15 @@ def send(message_id, task_id=""):
 
 
 @pytest.fixture
-async def runtime(tmp_path: Path):
+async def runtime():
     session_id = str(uuid4())
-    identity = tmp_path / "name"
-    identity.write_text("session-" + session_id)
-    (tmp_path / "atespace").write_text("team-a")
-    (tmp_path / "uid").write_text("actor-uid")
     service = Storage(session_id)
     server = grpc.aio.server()
     storerpc.add_TaskStoreServiceServicer_to_server(service, server)
     port = server.add_insecure_port("127.0.0.1:0")
     await server.start()
     client = AsyncControllerClient(f"http://127.0.0.1:{port}")
-    store = KAgentTaskStore(client, identity)
+    store = KAgentTaskStore(client)
     runner = Runner()
     handler = KAgentRequestHandler(
         agent_executor=runner,
@@ -234,7 +234,7 @@ async def test_failed_persistence_stops_native_execution(runtime):
     service.reject_saves = True
     stream = handler.on_message_send_stream(send("storage-failure"), ServerCallContext())
     async with asyncio.timeout(5):
-        with pytest.raises(grpc.aio.AioRpcError):
+        with pytest.raises(InternalError, match="task persistence failed"):
             async for _ in stream:
                 pass
     assert runner.calls == 0
@@ -394,6 +394,20 @@ async def test_failed_update_stops_native_execution(runtime):
     assert not service.settlements
 
 
+async def test_revoked_identity_stops_native_execution(runtime):
+    service, _, runner, handler = runtime
+    service.reject_identity_after_create = True
+    stream = handler.on_message_send_stream(send("identity-revoked"), ServerCallContext())
+    async with asyncio.timeout(5):
+        with pytest.raises(InternalError, match="task persistence failed"):
+            async for _ in stream:
+                pass
+        await runner.stopped.wait()
+    assert runner.calls == 1
+    assert service.task.status.state == a2a.TASK_STATE_SUBMITTED
+    assert not service.settlements
+
+
 async def test_cancel_during_initial_save(runtime):
     service, _, runner, handler = runtime
     service.creation_release.clear()
@@ -410,3 +424,30 @@ async def test_cancel_during_initial_save(runtime):
         assert result.status.state == a2a.TASK_STATE_CANCELED
         await pending
     assert runner.calls == 0
+
+
+async def test_runtime_identity_is_resolved_after_restore(runtime):
+    service, store, _, _ = runtime
+    assert await store._session_id() == service.session_id
+    service.session_id = str(uuid4())
+    assert await store._session_id() == service.session_id
+
+
+async def test_identity_failure_during_version_read_cancels_producer(runtime):
+    service, store, _, _ = runtime
+    task = a2a.Task(id="task", context_id=service.session_id, status=a2a.TaskStatus(state=a2a.TASK_STATE_WORKING))
+    await store.save(task, ServerCallContext())
+    service.reject_identity_after_create = True
+    producer = asyncio.create_task(asyncio.Event().wait())
+    context = ServerCallContext(state={_PRODUCER: producer})
+    try:
+        with pytest.raises(grpc.aio.AioRpcError) as error:
+            await store.save(task, context)
+        assert error.value.code() == grpc.StatusCode.UNAUTHENTICATED
+        with pytest.raises(asyncio.CancelledError):
+            await producer
+        with pytest.raises(InternalError, match="task persistence failed"):
+            await store.save(task, context)
+        assert service.version == 1
+    finally:
+        producer.cancel()

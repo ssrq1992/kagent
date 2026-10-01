@@ -32,28 +32,9 @@ export function AgentConcepts() {
       </Line>
       <Line theme={theme}>Each chat you start belongs to that agent.</Line>
 
-      {/*
-        Where these names come from, for a reader who has met the other half.
-
-        The runtime words on this page — worker, actor, scheduled — are Agent
-        Substrate's, not invented here, and somebody who has read either project's docs
-        is served by knowing they are the same words. Said once, at the foot, because it
-        is provenance rather than something needed to use the page.
-      */}
-      <Line theme={theme} testId="concepts-substrate">
-        These map to{" "}
-        <a
-          href="https://github.com/agent-substrate/substrate"
-          target="_blank"
-          rel="noreferrer"
-          css={{ color: theme.color.primaryText }}
-        >
-          Agent Substrate
-        </a>{" "}
-        concepts. A harness draws on a pool of <b>workers</b>, and each AgentInstance
-        runs as an <b>actor</b> scheduled onto one of them.
+      <Line theme={theme} testId="concepts-ax">
+        A harness selects an AX TaskGroup. Each conversation runs in its own AX Task.
       </Line>
-
 
       {/*
         Full width and reflowing, rather than four boxes at a fixed size.
@@ -83,7 +64,7 @@ export function AgentConcepts() {
           />
           <Box
             kind="Harness"
-            detail="The runtime, image and worker pool."
+            detail="The runtime, image and TaskGroup."
             onOpen={() => open("harnesses")}
           />
         </div>
@@ -95,7 +76,7 @@ export function AgentConcepts() {
           onOpen={() => open("agents")}
         />
         <FlowArrow theme={theme} />
-        <Box kind="AgentInstance" detail="One chat with an agent, run as a Substrate Actor." />
+        <Box kind="AgentInstance" detail="One chat with an agent, run as an AX Task." />
       </div>
 
     </Card>

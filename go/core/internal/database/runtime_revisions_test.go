@@ -3,6 +3,7 @@ package database
 import (
 	"context"
 	"fmt"
+	ax "github.com/google/ax/pkg/apis/v1alpha1"
 	"strings"
 	"sync"
 	"testing"
@@ -111,7 +112,7 @@ func TestRuntimeRevisionCollectionPreservesSessionAndCheckpoint(t *testing.T) {
 	require.NoError(t, err)
 	task.Status.State = a2a.TaskStateCompleted
 	require.NoError(t, saveRuntimeTask(t, client, session.GetId(), task, task,
-		&SessionTaskSnapshot{Atespace: "team-a", URI: "s3://snapshots/task", ContentScope: "FULL"}))
+		&SessionTaskSnapshot{Atespace: "team-a", Reference: "s3://snapshots/task", ContentScope: "FULL"}))
 	checkpoint, _, err := client.ReserveSessionCheckpoint(ctx, &apiv1alpha1.Checkpoint{
 		Id: uuid.NewString(), SessionId: session.GetId(), HeadTaskId: string(task.ID),
 	}, "alice", "checkpoint")
@@ -149,7 +150,7 @@ func TestRuntimeRevisionPairReplacement(t *testing.T) {
 	require.NoError(t, err)
 	revision.Revision = "new"
 	revision.AgentUID = "replacement-uid"
-	revision.ActorTemplateName = "new-actor-template"
+	revision.PreparedRuntimeName = "new-actor-template"
 	require.NoError(t, client.RecordRuntimeRevision(ctx, *revision, false))
 	pair := AgentDefinition{
 		Namespace: "team-a", AgentName: "assistant", AgentUID: revision.AgentUID,
@@ -327,12 +328,12 @@ func TestRuntimeRevisionClaimPreservesReferencesUntilFinalization(t *testing.T) 
 	require.NoError(t, err)
 	require.NotNil(t, retry)
 	require.Equal(t, claimed.Revision, retry.Revision)
-	require.Equal(t, claimed.ActorTemplateUID, retry.ActorTemplateUID)
+	require.Equal(t, claimed.PreparedRuntimeUID, retry.PreparedRuntimeUID)
 	require.NoError(t, restarted.DeleteRuntimeRevision(ctx, "revision", "revision-actor-uid"))
 	_, err = restarted.GetRuntimeRevision(ctx, "revision")
 	require.ErrorIs(t, err, ErrNotFound)
 	// The same digest can be prepared again once cleanup has completed.
-	original.ActorTemplateUID = "recreated-actor-uid"
+	original.PreparedRuntimeUID = "recreated-actor-uid"
 	require.NoError(t, restarted.RecordRuntimeRevision(ctx, *original, false))
 	newClaim, err := restarted.BeginRuntimeRevisionDeletion(ctx, "revision")
 	require.NoError(t, err)
@@ -398,7 +399,7 @@ func TestRuntimeRevisionFinalizationSerializesWithPairWrites(t *testing.T) {
 					}
 					created <- creating.UpsertAgentDefinition(ctx, pair)
 				}
-				finalize := func() { deleted <- deleting.DeleteRuntimeRevision(ctx, "revision", claimed.ActorTemplateUID) }
+				finalize := func() { deleted <- deleting.DeleteRuntimeRevision(ctx, "revision", claimed.PreparedRuntimeUID) }
 				if finalizeFirst {
 					go finalize()
 				} else {
@@ -440,7 +441,7 @@ func TestRecordRuntimeRevisionPromotesOnlyCurrentActivePair(t *testing.T) {
 		Revision: "first", Namespace: "team", AgentName: "assistant", AgentUID: "template-uid",
 		AgentCard:      &a2apb.AgentCard{Name: "original"},
 		SourceSnapshot: []byte("{}"), EgressDestinations: []string{},
-		ActorTemplateAtespace: "team", ActorTemplateName: "first", ActorTemplateUID: "actor-uid",
+		PreparedRuntimeAtespace: "team", PreparedRuntimeName: "first", PreparedRuntimeUID: "actor-uid",
 	}
 	pair := AgentDefinition{
 		Namespace: revision.Namespace, AgentName: revision.AgentName, AgentUID: revision.AgentUID,
@@ -471,17 +472,17 @@ func TestRecordRuntimeRevisionPromotesOnlyCurrentActivePair(t *testing.T) {
 	assertAvailableRevision("first")
 	pair.DesiredRevision = "second"
 	require.NoError(t, c.UpsertAgentDefinition(ctx, pair))
-	revision.Revision, revision.ActorTemplateName = "second", "second"
+	revision.Revision, revision.PreparedRuntimeName = "second", "second"
 	require.NoError(t, c.RecordRuntimeRevision(ctx, revision, true))
 	assertAvailableRevision("second")
 	// A delayed report for the old revision must not replace the newer ready revision.
-	revision.Revision, revision.ActorTemplateName = "first", "first"
+	revision.Revision, revision.PreparedRuntimeName = "first", "first"
 	require.NoError(t, c.RecordRuntimeRevision(ctx, revision, true))
 	assertAvailableRevision("second")
 	pair.DesiredRevision = "third"
 	require.NoError(t, c.UpsertAgentDefinition(ctx, pair))
 	require.NoError(t, c.RetireAgentIdentities(ctx, pair.Namespace, pair.AgentName, nil))
-	revision.Revision, revision.ActorTemplateName = "third", "third"
+	revision.Revision, revision.PreparedRuntimeName = "third", "third"
 	require.NoError(t, c.RecordRuntimeRevision(ctx, revision, true))
 	assertAvailableRevision("")
 	// Reviving the pair must retain the last success, not a report made while retired.
@@ -491,23 +492,23 @@ func TestRecordRuntimeRevisionPromotesOnlyCurrentActivePair(t *testing.T) {
 
 func TestRuntimeRevisionPersistsCredentialBindings(t *testing.T) {
 	client := NewClient(setupTestDB(t))
-	revision := RuntimeRevision{Revision: "credential-revision", Namespace: "team", AgentName: "agent", AgentUID: "agent", SourceSnapshot: []byte("{}"), AgentCard: &a2apb.AgentCard{}, EgressDestinations: []string{"api.example.com"}, ActorTemplateAtespace: "team", ActorTemplateName: "runtime", Credentials: []egress.Credential{{Hostname: "api.example.com", Header: "authorization", Prefix: "Bearer ", URI: "ate-secret://k8s.io/default/team/auth/token"}}}
+	revision := RuntimeRevision{Revision: "credential-revision", Namespace: "team", AgentName: "agent", AgentUID: "agent", SourceSnapshot: []byte("{}"), AgentCard: &a2apb.AgentCard{}, EgressDestinations: []string{"api.example.com"}, PreparedRuntimeAtespace: "team", PreparedRuntimeName: "runtime", Credentials: []egress.Credential{{Hostname: "api.example.com", Header: "authorization", Prefix: "Bearer ", SecretKeyRef: &ax.CredentialSecretRef{Namespace: "team", Name: "auth", Key: "token"}}}}
 	require.NoError(t, client.RecordRuntimeRevision(t.Context(), revision, false))
 	got, err := client.GetRuntimeRevision(t.Context(), revision.Revision)
 	require.NoError(t, err)
-	require.Equal(t, revision.Credentials, got.Credentials)
-	revision.Credentials[0].URI = "ate-secret://k8s.io/default/team/other/token"
+	require.True(t, egress.CredentialsEqual(revision.Credentials, got.Credentials))
+	revision.Credentials[0].SecretKeyRef = &ax.CredentialSecretRef{Namespace: "team", Name: "other", Key: "token"}
 	require.NoError(t, client.RecordRuntimeRevision(t.Context(), revision, false))
 	unchanged, err := client.GetRuntimeRevision(t.Context(), revision.Revision)
 	require.NoError(t, err)
-	require.Equal(t, got.Credentials, unchanged.Credentials, "revision credentials are immutable")
+	require.True(t, egress.CredentialsEqual(got.Credentials, unchanged.Credentials), "revision credentials are immutable")
 }
 
 func TestRuntimeRevisionRejectsMalformedStoredCredentials(t *testing.T) {
 	revision, err := toRuntimeRevision(runtimeRevisionRow{
 		Revision: "bad-revision",
 		Credentials: []egress.Credential{{
-			Hostname: "*", Header: "authorization", URI: "ate-secret://k8s.io/default/team/auth/token",
+			Hostname: "*", Header: "authorization", SecretKeyRef: &ax.CredentialSecretRef{Namespace: "team", Name: "auth", Key: "token"},
 		}},
 	})
 	require.ErrorContains(t, err, "decode runtime revision bad-revision credentials")
