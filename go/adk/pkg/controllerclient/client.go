@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	ax "github.com/google/ax/pkg/apis/v1alpha1"
 	"github.com/kagent-dev/kagent/go/adk/pkg/auth"
 	apiv1alpha1 "github.com/kagent-dev/kagent/go/api/gen/kagent/api/v1alpha1"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
@@ -16,6 +17,18 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 )
+
+// PATCH(new-egress-schema): the deployed substrate's egress gateway replaced
+// unconditional credential injection with replace-on-placeholder semantics:
+// the x-ax-runtime-credential header reaches the controller only when the
+// runtime itself sends a placeholder value, which the gateway swaps for the
+// real credential. Attach the placeholder to every call on the controller
+// connection so TaskStore/Memory authentication survives the gateway.
+const runtimeCredentialPlaceholder = "kagent-credential-injected"
+
+func withRuntimeCredentialHeader(ctx context.Context) context.Context {
+	return metadata.AppendToOutgoingContext(ctx, ax.RuntimeCredentialHeader, runtimeCredentialPlaceholder)
+}
 
 const (
 	defaultTimeout        = 30 * time.Second
@@ -67,10 +80,18 @@ func New(config Config) (*Client, error) {
 			transportCredentials = insecure.NewCredentials()
 		}
 	}
-	dialOptions := make([]grpc.DialOption, 0, len(config.DialOptions)+3)
+	dialOptions := make([]grpc.DialOption, 0, len(config.DialOptions)+5)
 	dialOptions = append(dialOptions,
 		grpc.WithTransportCredentials(transportCredentials),
 		grpc.WithStatsHandler(otelgrpc.NewClientHandler()),
+		// PATCH(new-egress-schema): placeholder header for gateway-side
+		// credential replacement on every RPC over this connection.
+		grpc.WithChainUnaryInterceptor(func(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
+			return invoker(withRuntimeCredentialHeader(ctx), method, req, reply, cc, opts...)
+		}),
+		grpc.WithChainStreamInterceptor(func(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, streamer grpc.Streamer, opts ...grpc.CallOption) (grpc.ClientStream, error) {
+			return streamer(withRuntimeCredentialHeader(ctx), desc, cc, method, opts...)
+		}),
 	)
 	if config.MaxMessageBytes > 0 {
 		dialOptions = append(dialOptions, grpc.WithDefaultCallOptions(

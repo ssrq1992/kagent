@@ -28,6 +28,42 @@ var (
 	)
 )
 
+// PATCH(local-env): these definitions are referenced by app.go (AX mTLS dial and
+// the HTTPS callback server) but were missing from the pushed commit — the Helm
+// chart (controller-configmap KAGENT_AX_* / KAGENT_API_TLS_* keys) and the ops
+// manual both document them, so the definitions below restore the intended
+// registration. Likely an uncommitted local change lost upstream.
+var (
+	APITLSCertFile = RegisterStringVar(
+		"KAGENT_API_TLS_CERT_FILE", "",
+		"TLS certificate file for the controller HTTPS server (AX TaskStore callbacks and browser/API proxy traffic).", ComponentController,
+	)
+	APITLSKeyFile = RegisterStringVar(
+		"KAGENT_API_TLS_KEY_FILE", "",
+		"TLS key file for the controller HTTPS server.", ComponentController,
+	)
+	AXEndpoint = RegisterStringVar(
+		"KAGENT_AX_ENDPOINT", "",
+		"AX managed-runtime gRPC endpoint, e.g. dns:///ax-server.ax-system.svc:8443.", ComponentController,
+	)
+	AXServerName = RegisterStringVar(
+		"KAGENT_AX_SERVER_NAME", "",
+		"Expected TLS server name (SAN) of the AX endpoint.", ComponentController,
+	)
+	AXCAFile = RegisterStringVar(
+		"KAGENT_AX_CA_FILE", "",
+		"CA bundle file that verifies the AX server certificate.", ComponentController,
+	)
+	AXClientCertFile = RegisterStringVar(
+		"KAGENT_AX_CLIENT_CERT_FILE", "",
+		"Client certificate file for the AX mTLS connection.", ComponentController,
+	)
+	AXClientKeyFile = RegisterStringVar(
+		"KAGENT_AX_CLIENT_KEY_FILE", "",
+		"Client key file for the AX mTLS connection.", ComponentController,
+	)
+)
+
 // Shared settings read by logging and Kubernetes libraries.
 var (
 	LogLevel   = RegisterStringVar("KAGENT_LOG_LEVEL", "info", "Logging level for the controller, CLI, and Go/Python runtimes, including the Python ADK HTTP server: debug, info, warn, or error. Python also accepts standard Python logging levels.", ComponentController, ComponentCLI, ComponentAgentRuntime)

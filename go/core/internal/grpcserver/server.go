@@ -237,5 +237,10 @@ func loadTLSConfig(certFile, keyFile string) (*tls.Config, error) {
 	return &tls.Config{
 		Certificates: []tls.Certificate{certificate},
 		MinVersion:   tls.VersionTLS12,
+		// PATCH(alpn): advertise h2 so grpc-go >= 1.67 clients (kagent CLI,
+		// agent runtime TaskStore callbacks) pass ALPN enforcement. Without
+		// NextProtos the manual tls.NewListener in Start() negotiates no ALPN
+		// and every native gRPC dial fails with "missing selected ALPN".
+		NextProtos: []string{"h2", "http/1.1"},
 	}, nil
 }
