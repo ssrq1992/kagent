@@ -1,0 +1,6 @@
+dependencies:
+- name: kmcp-crds
+  repository: file://../kmcp-crds-vendored
+  version: 1.0.0
+digest: sha256:c38014667b09b2f4f3e251e5ab6a24b9412865d721903210789a6e2cf56fafe9
+generated: "2026-10-02T17:03:14.630311394Z"

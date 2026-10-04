@@ -1,0 +1,7 @@
+apiVersion: v2
+name: kagent
+description: A Helm chart for kagent, built with Google ADK
+type: application
+version: 0.0.0-ax.1
+annotations:
+  "org.opencontainers.image.source": "https://github.com/kagent-dev/kagent"

@@ -1,0 +1,12 @@
+apiVersion: v2
+name: kagent-crds
+description: CRDs for kagent
+type: application
+version: 0.0.0-ax.1
+annotations:
+  "org.opencontainers.image.source": "https://github.com/kagent-dev/kagent"
+dependencies:
+  - name: kmcp-crds
+    version: 1.0.0
+    repository: file://../kmcp-crds-vendored
+    condition: kmcp.enabled
